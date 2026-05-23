@@ -16,7 +16,10 @@
     "sidePanel",
     "webNavigation"
   ],
-  "host_permissions": ["*://*/*"],
+  "host_permissions": [
+    "*://*.cnki.net/*",
+    "*://*.edu.cn/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
