@@ -32,6 +32,14 @@
 
 > 建议每次下载不超过 20 篇，下载后间隔一段时间再继续，避免触发知网访问限制。
 
+## 关于作者
+
+欢迎关注公众号，获取插件更新通知及其他 AI 效率工具分享。
+
+<img src="extension/icons/qrcode.jpg" width="160" alt="公众号二维码">
+
+公众号：**zgmgm**
+
 ## 隐私政策
 
 见 [PRIVACY.md](./PRIVACY.md)
