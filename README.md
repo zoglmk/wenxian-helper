@@ -1,4 +1,4 @@
-# CNKI助手
+# 文献助手
 
 知网文献 PDF 批量下载 Chrome 扩展。
 
@@ -14,7 +14,7 @@
 
 ## 安装
 
-从 [Chrome Web Store](#) 安装（链接待补充），或下载 [Release](https://github.com/zgmgm/cnki-helper/releases) 中的 zip 文件手动加载。
+从 [Chrome Web Store](#) 安装（链接待补充），或下载 [Release](https://github.com/zoglmk/cnki-helper/releases) 中的 zip 文件手动加载。
 
 **手动加载步骤：**
 1. 下载并解压 zip

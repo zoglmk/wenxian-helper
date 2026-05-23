@@ -1,10 +1,10 @@
-# Privacy Policy - CNKI助手 (CNKI Helper)
+# Privacy Policy - 文献助手
 
 Last updated: 2026-05-23
 
 ## Overview
 
-CNKI助手 is a Chrome extension that helps users batch download academic papers from CNKI (China National Knowledge Infrastructure). We are committed to protecting your privacy.
+文献助手 is a Chrome extension that helps users batch download academic papers from CNKI (China National Knowledge Infrastructure). We are committed to protecting your privacy.
 
 ## Data Collection
 
@@ -44,4 +44,4 @@ All requests are made on your behalf using your existing browser session. No dat
 
 ## Contact
 
-If you have any questions about this privacy policy, please open an issue on the [GitHub repository](https://github.com/zgmgm/cnki-helper).
+If you have any questions about this privacy policy, please open an issue on the [GitHub repository](https://github.com/zoglmk/cnki-helper).

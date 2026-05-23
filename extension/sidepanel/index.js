@@ -1,4 +1,4 @@
-/* CNKI Helper - Side Panel Application */
+/* 文献助手 - Side Panel Application */
 
 // ── State ──
 let papers = [];
