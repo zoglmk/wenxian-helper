@@ -1858,8 +1858,8 @@ function setupTipQrFallback() {
 }
 
 // ── Update Notes ──
-const CURRENT_VERSION = "1.2.0";
-const UPDATE_NOTE = 'v1.2.0 更新：新增 DOI 导入英文文献（Unpaywall + Sci-Hub）、指定下载文件夹、批量重试，修复批量下载失败及学校 WebVPN 代理兼容问题';
+const CURRENT_VERSION = "1.2.1";
+const UPDATE_NOTE = 'v1.2.1 更新：修复插件改名后的兼容问题，DOI 下载失败不再触发批量暂停，优化权限范围';
 
 async function checkUpdate() {
   const data = await chrome.storage.local.get(["lastSeenVersion"]);
