@@ -36,6 +36,12 @@
 
 见 [PRIVACY.md](./PRIVACY.md)
 
+## 项目起源
+
+本项目由油猴脚本演化而来。早期版本以 Greasyfork 用户脚本形式发布，后重构为浏览器扩展以支持更完整的功能。
+
+原始脚本：[中国知网CNKI硕博论文PDF下载 - Greasy Fork](https://greasyfork.org/zh-CN/scripts/389343-%E4%B8%AD%E5%9B%BD%E7%9F%A5%E7%BD%91cnki%E7%A1%95%E5%8D%9A%E8%AE%BA%E6%96%87pdf%E4%B8%8B%E8%BD%BD)
+
 ## 版本历史
 
 - **v1.2.0** — 新增 DOI 导入英文文献、指定下载文件夹、批量重试，修复批量下载稳定性及学校 WebVPN 兼容问题
