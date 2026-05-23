@@ -2,6 +2,8 @@
 
 知网文献 PDF 批量下载 Chrome 扩展。
 
+![文献助手截图](screenshots/preview.jpg)
+
 ## 功能
 
 - 在知网搜索结果页、期刊目录页一键收藏文献
