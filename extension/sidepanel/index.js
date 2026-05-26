@@ -1827,8 +1827,8 @@ function setupTipQrFallback() {
 }
 
 // ── Update Notes ──
-const CURRENT_VERSION = "1.2.1";
-const UPDATE_NOTE = 'v1.2.1 更新：修复插件改名后的兼容问题，DOI 下载失败不再触发批量暂停，优化权限范围';
+const CURRENT_VERSION = "1.2.2";
+const UPDATE_NOTE = 'v1.2.2 更新：修复 DOI 导入因权限缺失导致全部失败的问题';
 
 async function checkUpdate() {
   const data = await chrome.storage.local.get(["lastSeenVersion"]);
