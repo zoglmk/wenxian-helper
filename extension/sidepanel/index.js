@@ -1480,15 +1480,6 @@ async function doExport(format) {
 
 // ── Events ──
 // ── DOI Import ──
-const SCIHUB_DOMAINS = [
-  "https://sci-hub.se",
-  "https://sci-hub.st",
-  "https://sci-hub.ru",
-  "https://sci-hub.su",
-  "https://sci-hub.box",
-  "https://sci-hub.red",
-];
-
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1527,7 +1518,7 @@ async function fetchPdfByDoi(doi) {
 
   if (pdfLink) return { pdfLink, pdfSource, ...meta };
 
-  // Step 2: Sci-Hub 兜底 — 先试 bban.top 直链，失败再逐个域名解析 HTML
+  // Step 2: bban.top 直链兜底
   try {
     const bbanUrl = `https://sci.bban.top/pdf/${doi}.pdf?download=true`;
     const res = await sendToBackground({ type: "FETCH_TEXT", url: bbanUrl, timeoutMs: 10000, headers: BROWSER_HEADERS });
@@ -1536,28 +1527,6 @@ async function fetchPdfByDoi(doi) {
       pdfSource = "Sci-Hub";
     }
   } catch {}
-
-  if (!pdfLink) {
-    for (const domain of SCIHUB_DOMAINS) {
-      try {
-        const res = await sendToBackground({ type: "FETCH_TEXT", url: `${domain}/${doi}`, timeoutMs: 10000, headers: { ...BROWSER_HEADERS, "Referer": `${domain}/` } });
-        if (!res?.ok || !res.text) continue;
-        const doc = new DOMParser().parseFromString(res.text, "text/html");
-        const pdfEl = doc.querySelector("#pdf, embed[src], iframe[src], a[href*='.pdf']");
-        let url = pdfEl?.getAttribute("src") || pdfEl?.getAttribute("href") || "";
-        if (!url) continue;
-        if (!url.startsWith("http")) url = domain + (url.startsWith("/") ? "" : "/") + url;
-        pdfLink = url;
-        pdfSource = "Sci-Hub";
-        if (!meta.title) {
-          const rawTitle = doc.querySelector("title")?.textContent || "";
-          const cleaned = rawTitle.replace(/\s*[|｜]\s*sci-?hub.*/i, "").trim();
-          if (cleaned) meta.title = cleaned;
-        }
-        break;
-      } catch {}
-    }
-  }
 
   if (pdfLink) return { pdfLink, pdfSource, ...meta };
   if (meta.title) return { pdfLink: "", pdfSource: "", ...meta }; // 有元数据但无PDF
