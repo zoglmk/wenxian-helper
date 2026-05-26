@@ -16,7 +16,7 @@
 
 ## 安装
 
-从 [Chrome Web Store](#) 安装（链接待补充），或下载 [Release](https://github.com/zoglmk/cnki-helper/releases) 中的 zip 文件手动加载。
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/%E6%96%87%E7%8C%AE%E5%8A%A9%E6%89%8B/lkmbpjkmfijfehbebfkhalhdlopneinh) 安装，或下载 [Release](https://github.com/zoglmk/cnki-helper/releases) 中的 zip 文件手动加载。
 
 **手动加载步骤：**
 1. 下载并解压 zip
