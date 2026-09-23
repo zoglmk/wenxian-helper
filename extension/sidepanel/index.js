@@ -844,7 +844,16 @@ let pendingResumeIds = [];
 let lastBlockOpenUrl = "";
 
 // Returns: "success" | "verify" | "quota" | "fail"
+let downloadBusy = false;
+let downloadQueueBusy = false;
 async function downloadPaper(id) {
+  if (downloadBusy) return "busy";
+  downloadBusy = true;
+  try { return await performDownload(id); }
+  finally { downloadBusy = false; }
+}
+
+async function performDownload(id) {
   const paper = papers.find((p) => p.id === id);
   if (!paper?.pdfLink) return "fail";
 
@@ -854,13 +863,13 @@ async function downloadPaper(id) {
   if (paper.pdfSource) {
     try {
       const filename = createSafeFilename(paper.title || paper.doi || "paper");
-      await sendToBackground({ type: "MARK_DOWNLOAD" });
-      const res = await sendToBackground({ type: "SAVE_DOWNLOAD", url: paper.pdfLink, filename });
+      const res = await sendToBackground({ type: "SAVE_DOWNLOAD", url: paper.pdfLink, filename, useFolder: true });
       if (res?.ok && res.downloadId != null) {
         const result = await waitForDownloadById(res.downloadId);
         if (result === "success") {
           setDownloadState(id, "success");
           consecutiveFails = 0;
+          return "success";
         } else {
           setDownloadState(id, "error", result);
           addLog("error", `下载失败: ${paper.title}`, `原因: ${result}\nURL: ${paper.pdfLink}`);
@@ -874,7 +883,7 @@ async function downloadPaper(id) {
       addLog("error", `下载失败: ${paper.title}`, `${err.message}\nURL: ${paper.pdfLink}`);
       // DOI 下载失败不计入连续失败次数
     }
-    return;
+    return "fail";
   }
 
   // Listen for sub-frame navigations on the download tab so we can capture the
@@ -882,6 +891,8 @@ async function downloadPaper(id) {
   // (cross-origin reads inside the iframe are opaque to us).
   let frameFinalUrl = "";
   let navListener = null;
+  let downloadResultPromise = null;
+  let downloadToken = null;
 
   try {
     // Trigger iframe in a CNKI/WebVPN tab so cookies and Referer are correct.
@@ -889,8 +900,9 @@ async function downloadPaper(id) {
     const tab = await getCnkiTab();
     if (!tab?.id) throw new Error("请打开知网页面后再下载");
 
-    // 标记下一个下载属于插件，background 的 onDeterminingFilename 才会应用文件夹
-    await sendToBackground({ type: "MARK_DOWNLOAD" });
+    const marked = await sendToBackground({ type: "MARK_DOWNLOAD", url: paper.pdfLink });
+    if (!marked?.ok) throw new Error(marked?.error || "无法登记下载任务");
+    downloadToken = marked.token;
 
     navListener = (details) => {
       if (details.tabId !== tab.id || details.frameId === 0) return;
@@ -899,9 +911,8 @@ async function downloadPaper(id) {
     chrome.webNavigation.onCommitted.addListener(navListener);
 
     // Pre-subscribe before iframe load to avoid race.
-    // 8s to start (chrome.downloads.onCreated fires within 1-3s on success),
-    // 60s after that to finish (large PDFs may take a while).
-    const downloadResultPromise = waitForDownload(paper.pdfLink, 15000, 60000);
+    // 启动最多等待 15 秒，完成最多等待 120 秒；超时不会当作完成。
+    downloadResultPromise = waitForDownload(paper.pdfLink, 15000, 120000);
 
     // Trigger download via hidden iframe in page's MAIN world.
     // Inject promise resolves once the frame fires onload (so we can sniff
@@ -1013,78 +1024,36 @@ async function downloadPaper(id) {
     consecutiveFails++;
     return "fail";
   } finally {
+    downloadResultPromise?.cancel?.();
+    if (downloadToken) {
+      try { await sendToBackground({ type: "UNMARK_DOWNLOAD", token: downloadToken }); }
+      catch (err) { addLog("error", "下载标记清理失败", err.message); }
+    }
     if (navListener) {
       try { chrome.webNavigation.onCommitted.removeListener(navListener); } catch {}
     }
   }
 }
 
-// Wait for a download to appear and complete
-// Two-phase timeout: startTimeoutMs to see onCreated (i.e. download actually
-// kicked off), then completeTimeoutMs after that for the file to finish.
-// If start times out → "timeout" (didn't trigger at all).
-// If complete times out after start fired → assume "success" (chrome handles
-// the rest of the lifecycle in the downloads UI; we just wanted to know it ran).
-// 用已知 downloadId 等待下载完成（避免 onCreated 竞态问题）
+// 两种下载方式使用同一完成判定；监听器在任何结束分支都会清理。
 function waitForDownloadById(downloadId, timeoutMs = 120000) {
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      chrome.downloads.onChanged.removeListener(onChange);
-    };
-    const timer = setTimeout(() => { cleanup(); resolve("timeout"); }, timeoutMs);
-    const onChange = (delta) => {
-      if (delta.id !== downloadId) return;
-      if (delta.state?.current === "complete") { cleanup(); resolve("success"); }
-      else if (delta.state?.current === "interrupted") { cleanup(); resolve(delta.error?.current || "下载中断"); }
-    };
-    chrome.downloads.onChanged.addListener(onChange);
-    // 检查是否已经完成（download 调用和监听器注册之间可能已完成）
-    chrome.downloads.search({ id: downloadId }, ([item]) => {
-      if (!item) return;
-      if (item.state === "complete") { cleanup(); resolve("success"); }
-      else if (item.state === "interrupted") { cleanup(); resolve(item.error || "下载中断"); }
-    });
-  });
+  return DownloadTracking.wait({ id: downloadId, completeTimeout: timeoutMs });
 }
-
-function waitForDownload(expectedUrl, startTimeoutMs = 8000, completeTimeoutMs = 60000) {
-  return new Promise((resolve) => {
-    let matchedId = null;
-    let startTimer = null, completeTimer = null;
-    const cleanup = () => {
-      if (startTimer) clearTimeout(startTimer);
-      if (completeTimer) clearTimeout(completeTimer);
-      chrome.downloads.onCreated.removeListener(onCreate);
-      chrome.downloads.onChanged.removeListener(onChange);
-    };
-    startTimer = setTimeout(() => { cleanup(); resolve("timeout"); }, startTimeoutMs);
-
-    const onCreate = (item) => {
-      if (matchedId != null) return;
-      matchedId = item.id;
-      clearTimeout(startTimer);
-      startTimer = null;
-      completeTimer = setTimeout(() => { cleanup(); resolve("success"); }, completeTimeoutMs);
-    };
-
-    const onChange = (delta) => {
-      if (delta.id !== matchedId) return;
-      if (delta.state?.current === "complete") {
-        cleanup();
-        resolve("success");
-      } else if (delta.state?.current === "interrupted") {
-        cleanup();
-        resolve(delta.error?.current || "下载中断");
-      }
-    };
-
-    chrome.downloads.onCreated.addListener(onCreate);
-    chrome.downloads.onChanged.addListener(onChange);
-  });
+function waitForDownload(expectedUrl, startTimeoutMs = 15000, completeTimeoutMs = 120000) {
+  return DownloadTracking.wait({ url: expectedUrl, startTimeout: startTimeoutMs, completeTimeout: completeTimeoutMs });
 }
 
 async function runDownloadQueue(ids) {
+  if (downloadQueueBusy || downloadBusy) {
+    $("#footer-status").textContent = "已有下载任务进行中，请等待当前任务结束";
+    return;
+  }
+  downloadQueueBusy = true;
+  try { await processDownloadQueue([...new Set(ids)]); }
+  finally { downloadQueueBusy = false; }
+}
+
+async function processDownloadQueue(ids) {
   consecutiveFails = 0;
   pendingResumeIds = [];
   updateResumeButton();
@@ -1834,9 +1803,9 @@ function bindEvents() {
   // Paper list clicks
   $("#paper-list").addEventListener("click", (e) => {
     const dl = e.target.closest(".dl-btn");
-    if (dl) { downloadPaper(parseInt(dl.dataset.id)); return; }
+    if (dl) { runDownloadQueue([parseInt(dl.dataset.id)]); return; }
     const retry = e.target.closest(".retry-btn");
-    if (retry) { downloadPaper(parseInt(retry.dataset.id)); return; }
+    if (retry) { runDownloadQueue([parseInt(retry.dataset.id)]); return; }
 
     // Abstract toggle
     const absBtn = e.target.closest(".abstract-toggle-btn");

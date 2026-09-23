@@ -1,5 +1,5 @@
 /* Service Worker - handles networking, downloads, and side panel setup */
-importScripts("proxy-domains.js");
+importScripts("proxy-domains.js", "download-tracking.js");
 
 // 动态脚本跨重启保留；启动和外部撤销权限时核对注册状态。
 function syncProxyDomains() {
@@ -45,14 +45,17 @@ async function handleFetchPost({ url, body, referrer, headers }) {
   return { ok: res.ok, status: res.status, text: await res.text(), finalUrl: res.url };
 }
 
-async function handleSaveDownload({ url, filename }) {
+async function handleSaveDownload({ url, filename, useFolder }) {
+  await folderReady;
+  const folder = useFolder ? DownloadTracking.folderName(cachedDownloadFolder) : "";
+  if (folder) filename = `${folder}/${filename}`;
   const downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
   return { ok: true, downloadId };
 }
 
 // 缓存文件夹设置
 let cachedDownloadFolder = "";
-chrome.storage.local.get(["downloadFolder"]).then((data) => {
+const folderReady = chrome.storage.local.get(["downloadFolder"]).then((data) => {
   cachedDownloadFolder = (data.downloadFolder || "").trim();
 });
 chrome.storage.onChanged.addListener((changes) => {
@@ -61,17 +64,19 @@ chrome.storage.onChanged.addListener((changes) => {
   }
 });
 
-// 插件待处理的下载计数（只有插件主动标记的下载才应用文件夹）
-let pluginDownloadPending = 0;
-
-// 拦截知网 iframe 触发的下载，仅对插件标记的下载加文件夹前缀
+// 标记限于一个原始 URL，失败、验证码和等待结束后主动清理；遗留标记 15 秒过期。
+const pendingDownloads = new Map();
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  if (pluginDownloadPending <= 0) { suggest(); return; }
-  pluginDownloadPending--;
-  const folder = cachedDownloadFolder.replace(/[\/:*?"<>|\\]/g, "_");
-  if (!folder) { suggest(); return; }
-  const basename = item.filename.split(/[\\/]/).pop() || item.filename;
-  suggest({ filename: folder + "/" + basename, conflictAction: "uniquify" });
+  for (const [token, task] of pendingDownloads) {
+    if (task.expires <= Date.now()) { pendingDownloads.delete(token); continue; }
+    if (!DownloadTracking.matches(item, task.url)) continue;
+    pendingDownloads.delete(token);
+    const basename = item.filename.split(/[\\/]/).pop();
+    if (task.folder && basename) suggest({ filename: `${task.folder}/${basename}`, conflictAction: "uniquify" });
+    else suggest();
+    return;
+  }
+  suggest();
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -82,7 +87,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "FETCH_TEXT") return await handleFetchText(msg);
       if (msg.type === "FETCH_POST") return await handleFetchPost(msg);
       if (msg.type === "SAVE_DOWNLOAD") return await handleSaveDownload(msg);
-      if (msg.type === "MARK_DOWNLOAD") { pluginDownloadPending++; return { ok: true }; }
+      if (msg.type === "MARK_DOWNLOAD") {
+        if (!DownloadTracking.matches({ url: msg.url }, msg.url)) throw new Error("无效下载地址");
+        await folderReady;
+        const token = crypto.randomUUID();
+        pendingDownloads.set(token, { url: msg.url, folder: DownloadTracking.folderName(cachedDownloadFolder), expires: Date.now() + 15000 });
+        return { ok: true, token };
+      }
+      if (msg.type === "UNMARK_DOWNLOAD") { pendingDownloads.delete(msg.token); return { ok: true }; }
       if (msg.type === "UPDATE_PROXY_DOMAIN") {
         // 网站内容脚本无权修改域名设置。
         if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("sidepanel/index.html")) {
