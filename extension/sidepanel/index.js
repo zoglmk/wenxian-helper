@@ -46,7 +46,7 @@ function isDoiPaper(paper) {
 }
 function isProquestPaper(paper) { return paper?.provider === "proquest"; }
 function canDownloadPaper(paper) {
-  return isProquestPaper(paper) ? paper.proquestAccess === "open" && !!paper.pdfReady : !!paper?.pdfLink;
+  return isProquestPaper(paper) ? ProQuest.hasFullTextAccess(paper.proquestAccess) && !!paper.pdfReady : !!paper?.pdfLink;
 }
 function patchPaper(paper, changes, epoch) {
   return mutatePapers("patch", { items: [{ id: paper.id, instance: paper._instance, changes }] }, epoch);
@@ -237,7 +237,7 @@ function parseYear(dateStr) {
 }
 
 function detectDocType(paper) {
-  if (isProquestPaper(paper) && paper.docType === "D") return "D";
+  if (isProquestPaper(paper) && ["D", "J"].includes(paper.docType)) return paper.docType;
   const text = (paper.source || "") + " " + (paper.title || "");
   if (/学位论文|博士论文|硕士论文/.test(text)) return "D";
   if (/会议|proceedings/i.test(text)) return "C";
@@ -393,7 +393,7 @@ function formatBibTeX(paper) {
   const year = parseYear(paper.date);
   const docType = detectDocType(paper);
   // ProQuest 公开页未必提供学位种类，不能把所有学位论文都标为博士论文。
-  const entryType = isProquestPaper(paper) ? "misc" : docType === "D" ? "phdthesis" :
+  const entryType = isProquestPaper(paper) && docType === "D" ? "misc" : docType === "D" ? "phdthesis" :
                     docType === "C" ? "inproceedings" :
                     "article";
   const firstAuthor = (paper.author || "").split(/[;；、,,，]/)[0]?.trim() || "Anon";
@@ -409,7 +409,7 @@ function formatBibTeX(paper) {
     const auths = splitAuthors(paper.author).map(escape).join(" and ");
     if (auths) lines.push(`  author = {${auths}},`);
   }
-  if (isProquestPaper(paper)) {
+  if (isProquestPaper(paper) && docType === "D") {
     lines.push("  type = {Thesis},");
     if (paper.source) lines.push(`  school = {${escape(paper.source)}},`);
   } else if (paper.source) lines.push(`  journal = {${escape(paper.source)}},`);
@@ -745,7 +745,7 @@ async function fetchProquestPaper(paper, generation, epoch) {
     ({ paper: changes } = await resolveProquestPaper(paper));
   } catch (err) {
     changes = { pdfReady: false, pdfLink: "", pdfFailed: true, proquestReason: err.message };
-    if (taskCurrent(generation, epoch)) addLog("error", `获取公开全文失败: ${paper.title}`, err.message);
+    if (taskCurrent(generation, epoch)) addLog("error", `获取全文失败: ${paper.title}`, err.message);
   }
   if (taskCurrent(generation, epoch)) await patchPaper(paper, changes, epoch);
 }
@@ -1161,7 +1161,7 @@ async function performDownload(id, generation) {
   }
 }
 
-// ProQuest 单独刷新公开详情和媒体签名，不改写 URL，不进入知网 iframe 路径。
+// ProQuest 单独刷新当前权限详情和媒体签名，不改写 URL，不进入知网 iframe 路径。
 async function downloadProquestPaper(paper, generation) {
   const epoch = paperEpoch;
   const current = () => taskCurrent(generation, epoch) && papers.some(p => p.id === paper.id && p._instance === paper._instance);
@@ -1172,7 +1172,7 @@ async function downloadProquestPaper(paper, generation) {
     if (!current()) return "cancelled";
     await patchPaper(paper, resolved.paper, epoch);
     if (!current()) return "cancelled";
-    if (!resolved.pdfUrl && resolved.paper.proquestAccess !== "open") {
+    if (!ProQuest.hasFullTextAccess(resolved.paper.proquestAccess)) {
       setDownloadState(paper.id, "skipped", resolved.paper.proquestReason);
       return "skipped";
     }
@@ -1249,11 +1249,11 @@ async function processDownloadQueue(ids, { retry = false } = {}) {
     if (downloadState[id]?.status === "success") continue;
     const paper = papers.find((p) => p.id === id);
     if (!canDownloadPaper(paper)) {
-      // 已确认过公开状态的 ProQuest 重试进入重新解析；这不是文件下载授权。
+      // 已确认过全文权限的 ProQuest 重试进入重新解析；这不是文件下载授权。
       // downloadProquestPaper 仍使用本次详情的权限和新链接决定是否下载。
       if (!retry || !isProquestPaper(paper)) continue;
-      if (paper.proquestAccess !== "open") {
-        setDownloadState(id, "skipped", paper.proquestReason || "未确认公开全文，本版跳过");
+      if (!ProQuest.hasFullTextAccess(paper.proquestAccess)) {
+        setDownloadState(id, "skipped", paper.proquestReason || "未确认全文下载权限，本版跳过");
         continue;
       }
     }
@@ -1389,10 +1389,10 @@ function renderList() {
         </div>
         <div class="empty-new">
           <div class="empty-new-title">功能提示</div>
-          <div class="empty-new-item"><span class="empty-new-tag">ProQuest</span>支持公开学位论文全文、跨页收藏和批量下载，预览及购买项跳过</div>
+          <div class="empty-new-item"><span class="empty-new-tag">ProQuest</span>支持学位论文与期刊全文、跨页收藏和批量下载；按当前会话权限下载，未登录可下载公开全文，预览或无权限内容跳过</div>
           <div class="empty-new-item"><span class="empty-new-tag">DOI</span>切到「DOI导入」标签页，粘贴 DOI 列表自动获取英文文献下载链接</div>
           <div class="empty-new-item"><span class="empty-new-tag">文件夹</span>指定下载子文件夹，所有文献自动归类保存</div>
-          <div class="empty-new-item"><span class="empty-new-tag">稳定性</span>修复批量下载中途失败、支持学校 WebVPN 代理下载</div>
+          <div class="empty-new-item"><span class="empty-new-tag">自定义域名</span>添加图书馆或知网代理的搜索结果页地址，按提示授权后使用</div>
         </div>
       </div>`;
     updateFooter();
@@ -1445,7 +1445,7 @@ function createPaperCard(paper) {
       ${abstractHtml}
       <div class="paper-bottom">
         <div class="paper-stats">
-          ${isProquestPaper(paper) ? `<span class="pdf-source-tag pdf-source-proquest">ProQuest · ${paper.proquestAccess === "open" ? "公开全文" : "未确认公开全文"}</span>` : paper.pdfSource ? `<span class="pdf-source-tag pdf-source-${paper.pdfSource === "Unpaywall" ? "unpaywall" : "sci-hub"}">${escapeHtml(paper.pdfSource)}</span>` : `<span>被引 <strong>${escapeHtml(paper.quote || 0)}</strong></span><span>下载 <strong>${escapeHtml(paper.download || 0)}</strong></span>`}
+          ${isProquestPaper(paper) ? `<span class="pdf-source-tag pdf-source-proquest">ProQuest · ${paper.proquestAccess === "open" ? "公开全文" : paper.proquestAccess === "available" ? "可下载全文" : "待确认全文权限"}</span>` : paper.pdfSource ? `<span class="pdf-source-tag pdf-source-${paper.pdfSource === "Unpaywall" ? "unpaywall" : "sci-hub"}">${escapeHtml(paper.pdfSource)}</span>` : `<span>被引 <strong>${escapeHtml(paper.quote || 0)}</strong></span><span>下载 <strong>${escapeHtml(paper.download || 0)}</strong></span>`}
           ${levelHtml}
         </div>
         <div class="paper-action" data-id="${escapeHtml(paper.id)}">
@@ -1921,15 +1921,29 @@ function switchTab(feature) {
 function bindEvents() {
   $("#btn-add-proxy").addEventListener("click", addProxyDomain);
   // Download folder
-  $("#input-folder").addEventListener("input", async (e) => {
-    settings.downloadFolder = e.target.value.trim();
-    await chrome.storage.local.set({ downloadFolder: settings.downloadFolder });
-    const tip = $("#folder-tip");
-    if (settings.downloadFolder) {
-      tip.textContent = "需关闭Chrome「下载前询问保存位置」";
-    } else {
-      tip.textContent = "";
-    }
+  $("#input-folder").addEventListener("input", (e) => {
+    $("#folder-status").textContent = e.target.value.trim() !== settings.downloadFolder
+      ? "尚未保存，请点击保存" : settings.downloadFolder ? "已保存" : "当前使用默认下载位置";
+  });
+  $("#btn-save-folder").addEventListener("click", async () => {
+    const button = $("#btn-save-folder"), input = $("#input-folder"), status = $("#folder-status");
+    if (button.disabled) return;
+    const folder = input.value.trim();
+    button.disabled = true;
+    status.textContent = "保存中...";
+    try {
+      await chrome.storage.local.set({ downloadFolder: folder });
+      settings.downloadFolder = folder;
+      if (input.value.trim() === folder) {
+        input.value = folder;
+        status.textContent = folder ? "已保存" : "已恢复默认下载位置";
+      } else {
+        status.textContent = "已保存，当前修改尚未保存";
+      }
+      $("#folder-tip").textContent = folder ? "需关闭Chrome「下载前询问保存位置」" : "";
+    } catch (err) {
+      status.textContent = `保存失败：${err.message}，请重试`;
+    } finally { button.disabled = false; }
   });
 
   // Nav tab switch
@@ -1955,6 +1969,7 @@ function bindEvents() {
 
   // Add all papers from current page
   $("#btn-add-page").addEventListener("click", async () => {
+    const generation = taskGeneration;
     const ok = await ensureContentScript();
     if (!ok) { $("#footer-status").textContent = "请先进入知网或 ProQuest 页面，点击浏览器工具栏的文献助手图标后重试"; return; }
     try {
@@ -1963,18 +1978,22 @@ function bindEvents() {
         $("#footer-status").textContent = result?.error === "no_links" ? "当前页未找到文献" : `添加失败：${result?.error || "未知原因"}`;
         return;
       }
+      if (!taskCurrent(generation)) return;
+      // 存储通知可能晚于内容脚本回复；从最新清单读取累计数，避免把本次数当总数。
+      const data = await chrome.storage.local.get(["cnkiPapers", "cnkiPapersEpoch", "cnkiPapersRevision"]);
+      acceptPaperSnapshot({ papers: data.cnkiPapers, epoch: data.cnkiPapersEpoch || 0, revision: data.cnkiPapersRevision || 0 });
+      if (!taskCurrent(generation)) return;
       // Reset sort to default (insertion order) after adding
       if (result.added > 0 && sortField !== "") {
         sortField = "";
         sortDir = "desc";
         saveSort();
       }
-      // Storage change will trigger renderList via onChanged listener
-      $("#footer-status").textContent = result.provider === "proquest"
-        ? `新增 ${result.added} 篇公开论文，本页跳过 ${result.skipped} 条；可翻页继续添加`
-        : result.added > 0
-        ? `已添加 ${result.added} 篇 (本页共 ${result.total} 篇)`
-        : `本页 ${result.total} 篇均已在列表中`;
+      renderList(); restoreChecks(); updateFooter();
+      const parts = [`共 ${papers.length} 篇`, `本次新增 ${result.added} 篇`];
+      if (result.provider === "proquest" && result.skipped) parts.push(`本页跳过 ${result.skipped} 条`);
+      if (!result.added && result.total > (result.skipped || 0)) parts.push("可收藏文献已在清单中");
+      $("#footer-status").textContent = parts.join(" · ");
     } catch (err) {
       $("#footer-status").textContent = "添加失败: " + err.message;
     }
@@ -2135,7 +2154,7 @@ function setupTipQrFallback() {
 
 // ── Update Notes ──
 const CURRENT_VERSION = chrome.runtime.getManifest().version;
-const UPDATE_NOTE = `v${CURRENT_VERSION} 更新：新增 ProQuest 公开学位论文，支持跨页收藏、勾选和批量下载`;
+const UPDATE_NOTE = `v${CURRENT_VERSION} 更新：新增 ProQuest 学位论文与期刊全文，支持跨页收藏、勾选，按当前权限批量下载`;
 
 async function checkUpdate() {
   const data = await chrome.storage.local.get(["lastSeenVersion"]);
@@ -2156,6 +2175,7 @@ async function init() {
   $("#toggle-levels").checked = settings.fetchLevels;
   $("#toggle-auto-open-verify").checked = settings.autoOpenOnVerify;
   $("#input-folder").value = settings.downloadFolder;
+  if (settings.downloadFolder) $("#folder-status").textContent = "已保存";
   if (settings.downloadFolder) $("#folder-tip").textContent = "需关闭Chrome「下载前询问保存位置」";
   bindEvents();
   setupTipQrFallback();

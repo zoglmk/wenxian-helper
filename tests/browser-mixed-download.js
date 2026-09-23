@@ -5,7 +5,9 @@ async panel => {
   await context.request.get('http://127.0.0.1:18580/control?pqMode=%22open%22&fail=false&delay=0&validPdf=true');
   if (await panel.locator('#btn-clear').isVisible()) await panel.locator('#btn-clear').click();
   await panel.waitForFunction(() => papers.length === 0);
+  if (!await panel.locator('#input-folder').isVisible()) await panel.locator('.folder-settings summary').click();
   await panel.locator('#input-folder').fill('mixed-sources');
+  await panel.locator('#btn-save-folder').click();
   await panel.locator('#input-folder').dispatchEvent('change');
   const cnki = await context.newPage();
   await cnki.goto('https://kns.cnki.net:18543/mixed/search');

@@ -7,9 +7,9 @@ const panel=fs.readFileSync('extension/sidepanel/index.js','utf8').replace(/\nin
 const clone=v=>JSON.parse(JSON.stringify(v));
 function harness(initial=[]) {
  const elements=new Map();
- const el=s=>{if(!elements.has(s))elements.set(s,{value:'',textContent:'',hidden:false,style:{},dataset:{}});return elements.get(s);};
+ const el=s=>{if(!elements.has(s))elements.set(s,{value:'',textContent:'',hidden:false,style:{},dataset:{},listeners:{},addEventListener(type,fn){this.listeners[type]=fn;}});return elements.get(s);};
  const state={cnkiPapers:clone(initial),cnkiPapersEpoch:0};let context;
- const chrome={runtime:{getManifest:()=>({version:'1.2.3'}),sendMessage:async m=>context.store.update(m)},storage:{local:{get:async()=>clone(state),set:async values=>{Object.assign(state,clone(values));context.snapshot=clone(state);vm.runInContext('papers=snapshot.cnkiPapers; paperEpoch=snapshot.cnkiPapersEpoch;',context);}}}};
+ const chrome={runtime:{getManifest:()=>({version:'1.2.3'}),sendMessage:async m=>context.store.update(m)},storage:{onChanged:{addListener(){}},local:{get:async()=>clone(state),set:async values=>{Object.assign(state,clone(values));context.snapshot=clone(state);vm.runInContext('papers=snapshot.cnkiPapers; paperEpoch=snapshot.cnkiPapersEpoch;',context);}}}};
  context=vm.createContext({chrome,URL,crypto,setTimeout,clearTimeout,console,document:{querySelector:el,querySelectorAll:()=>[],createElement:()=>({dataset:{},innerHTML:''})}});
  vm.runInContext(fs.readFileSync('extension/paper-store.js','utf8')+'\nthis.store=PaperStore;',context);
  vm.runInContext(panel,context);context.snapshot=clone(state);
@@ -94,4 +94,26 @@ test('较早的保存回复或清空通知不能覆盖较新的清单视图',()=
  assert.deepEqual(Array.from(h.context.getSelectedIds()),[2]);
  assert.equal(h.context.acceptPaperSnapshot({papers:[{id:1,title:'old'}],epoch:0,revision:1}),false);
  assert.deepEqual(Array.from(h.context.getSelectedIds()),[2]);
+});
+
+
+test('文件夹草稿不影响有效目录，点击保存生效，清空后保存恢复默认',async()=>{
+ const h=harness();h.state.downloadFolder='existing';await h.context.loadSettings();h.context.bindEvents();
+ const input=h.el('#input-folder'),button=h.el('#btn-save-folder'),status=h.el('#folder-status');
+ input.value=' new-folder ';input.listeners.input({target:input});
+ assert.equal(h.state.downloadFolder,'existing');assert.equal(vm.runInContext('settings.downloadFolder',h.context),'existing');assert.match(status.textContent,/尚未保存/);
+ await button.listeners.click();assert.equal(h.state.downloadFolder,'new-folder');assert.equal(input.value,'new-folder');assert.equal(status.textContent,'已保存');
+ await h.context.loadSettings();assert.equal(vm.runInContext('settings.downloadFolder',h.context),'new-folder');
+ input.value='';input.listeners.input({target:input});assert.equal(h.state.downloadFolder,'new-folder');
+ await button.listeners.click();assert.equal(h.state.downloadFolder,'');assert.equal(status.textContent,'已恢复默认下载位置');assert.equal(h.el('#folder-tip').textContent,'');
+});
+test('文件夹保存失败不替换有效目录，重复点击不重复写入，迟到结果不覆盖新草稿',async()=>{
+ const h=harness();h.state.downloadFolder='existing';await h.context.loadSettings();h.context.bindEvents();
+ const input=h.el('#input-folder'),button=h.el('#btn-save-folder'),status=h.el('#folder-status');input.value='first';
+ h.chrome.storage.local.set=async()=>{throw new Error('storage unavailable');};
+ await button.listeners.click();assert.match(status.textContent,/保存失败/);assert.equal(button.disabled,false);assert.equal(vm.runInContext('settings.downloadFolder',h.context),'existing');assert.equal(h.state.downloadFolder,'existing');
+ let finish,writes=0;h.chrome.storage.local.set=values=>{writes++;return new Promise(resolve=>{finish=()=>{Object.assign(h.state,values);resolve();};});};
+ const saving=button.listeners.click();await button.listeners.click();assert.equal(writes,1);
+ input.value='second';input.listeners.input({target:input});finish();await saving;
+ assert.equal(h.state.downloadFolder,'first');assert.equal(input.value,'second');assert.match(status.textContent,/当前修改尚未保存/);assert.equal(button.disabled,false);
 });

@@ -42,7 +42,9 @@ async panel => {
   // 当前所用配置必须是测试配置。关闭旧样例标签，避免影响候选顺序。
   for (const tab of context.pages()) if (tab !== panel) await tab.close();
   await panel.bringToFront();
+  if (!await panel.locator('#input-folder').isVisible()) await panel.locator('.folder-settings summary').click();
   await panel.locator('#input-folder').fill('release-patch');
+  await panel.locator('#btn-save-folder').click();
   const baseline = Math.max(0, ...(await downloads()).map(d => d.id));
 
   const beforeDetail = await detailCount();

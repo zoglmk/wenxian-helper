@@ -32,18 +32,123 @@ function harness(initial = [paper()]) {
   vm.runInContext(read('paper-store.js') + '\nthis.store = PaperStore;', context);
   vm.runInContext(read('sidepanel/index.js').replace(/\ninit\(\);\s*$/, '\n'), context);
   context.initial = clone(initial);
+  const renderFooter = context.updateFooter;
   vm.runInContext('papers = initial; renderList = () => {}; restoreChecks = () => {}; updateFooter = () => {}; updateCardState = () => {};', context);
   context.addLog = (...args) => logs.push(args);
   const setState = context.setDownloadState;
   context.setDownloadState = (...args) => { statuses.push(args); setState(...args); };
   context.waitForDownloadById = async id => { assert.equal(id, 42); return 'success'; };
   context.resolveProquestPaper = async p => ({ paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/hms/PFT/fresh?_s=new%2Fsignature' });
-  return { context, state, calls, chrome, logs, statuses, el };
+  return { context, state, calls, chrome, logs, statuses, el, renderFooter };
 }
 
+test('添加本页的真实点击处理显示累计 40 和本次新增 20，重复添加保持累计数', async () => {
+  const h = harness([]);
+  h.context.updateFooter = h.renderFooter;
+  h.context.ensureContentScript = async () => true;
+  let page = 0;
+  h.context.sendToContent = async () => {
+    const items = Array.from({ length: 20 }, (_, i) => ({ id: page * 20 + i, title: `文献 ${page}-${i}`, detailUrl: `https://kns.cnki.net/detail/${page}/${i}` }));
+    const result = await h.context.store.update({ action: 'add', epoch: 0, items });
+    // 故意不发 storage.onChanged，验证回复与存储通知顺序不影响累计数。
+    return { ok: true, added: result.added, total: 20 };
+  };
+  h.context.bindEvents();
+  await h.el('#btn-add-page').listeners.click();
+  assert.match(h.el('#footer-status').textContent, /共 20 篇.*本次新增 20 篇/);
+  page = 1;
+  await h.el('#btn-add-page').listeners.click();
+  assert.equal(h.el('#list-count').textContent, '40 篇');
+  assert.match(h.el('#footer-status').textContent, /共 40 篇.*本次新增 20 篇/);
+  await h.el('#btn-add-page').listeners.click();
+  assert.match(h.el('#footer-status').textContent, /共 40 篇.*本次新增 0 篇/);
+  assert.match(h.el('#footer-status').textContent, /已在清单/);
+});
+
+// 选择器对应真实公开期刊的 jnlArticle / 开放阅览标记；浏览器用例另验证实际 DOM。
+function journalDoc({ access = 'open', detail = true, id = '3268524212', download = ['open', 'available'].includes(access) } = {}) {
+  const node = (textContent, attrs = {}) => ({ textContent, getAttribute: name => attrs[name] || '' });
+  const title = node('Public journal article', { href: `/docview/${id}/SESSION/1` });
+  const authors = node('Cheng, Zhuo; Lu, Xiaoping; 等.');
+  const fullAuthors = node('Cheng, Zhuo; Lu, Xiaoping; Long, Chunlin.');
+  const publication = node('People and Nature; London Vol. 7, Iss. 11, (Nov 1, 2025): 2700-2713.');
+  const label = node(access === 'preview' ? '提供预览' : '全文文献', access === 'open' ? { title: '开放阅览', 'aria-label': '开放阅览' } : {});
+  const pdf = node('下载 PDF', { title: access === 'preview' ? 'Download preview' : '下载 PDF', href: 'https://media.proquest.com/media/journal?_s=fresh' });
+  const root = {
+    querySelector: selector => {
+      if (selector.includes('h1.documentTitle')) return detail ? title : null;
+      if (selector.includes('h3 a')) return title;
+      if (selector.includes('moreAuthors_')) return detail ? fullAuthors : null;
+      if (selector === '.jnlArticle strong') return node('People and Nature');
+      if (selector.includes('.jnlArticle')) return publication;
+      return null;
+    },
+    querySelectorAll: selector => {
+      if (selector.includes('.scholUnivAuthors')) return [authors];
+      if (selector.startsWith('a.pdf-download')) return detail && download ? [pdf] : [];
+      if (selector.includes('.format-display')) return [label];
+      return [];
+    },
+  };
+  return root;
+}
+
+test('实际期刊的开放阅览标记可解析全文 PDF，并提取期刊元数据而非学位论文', () => {
+  const h = harness(), api = h.context.ProQuest;
+  const { paper: p, pdfUrl } = api.parseDetail(journalDoc(), 'https://www.proquest.com/docview/3268524212');
+  assert.equal(p.proquestAccess, 'open'); assert.equal(p.pdfReady, true);
+  assert.equal(p.docType, 'J'); assert.equal(p.source, 'People and Nature');
+  assert.equal(p.author, 'Zhuo Cheng;Xiaoping Lu;Chunlin Long');
+  assert.equal(p.date, '2025'); assert.equal(p.volume, '7'); assert.equal(p.issue, '11'); assert.equal(p.pages, '2700-2713');
+  assert.match(pdfUrl, /_s=fresh$/); assert.equal(p.pdfLink, '');
+  assert.match(h.context.formatBibTeX(p), /^@article/);
+  assert.match(h.context.formatBibTeX(p), /journal = \{People and Nature\}/);
+  assert.doesNotMatch(h.context.formatBibTeX(p), /Thesis|school =/);
+  assert.match(h.context.formatRIS(p), /TY  - JOUR/);
+});
+
+test('全文期刊结果可先收藏待确认，预览排除；全文字样本身不授予下载资格', () => {
+  const h = harness(), api = h.context.ProQuest;
+  const rows = [journalDoc({ access: 'unknown', detail: false }), journalDoc({ access: 'preview', detail: false, id: '222' })];
+  const collected = api.collect({ querySelectorAll: () => rows }, 'https://www.proquest.com/resultsol/session/1');
+  assert.equal(collected.entries.length, 1); assert.equal(collected.skipped, 1);
+  assert.equal(collected.entries[0].paper.docType, 'J');
+  assert.equal(collected.entries[0].paper.proquestAccess, 'unknown');
+  assert.equal(h.context.canDownloadPaper(collected.entries[0].paper), false);
+  for (const access of ['unknown', 'preview']) {
+    const parsed = api.parseDetail(journalDoc({ access }), 'https://www.proquest.com/docview/3268524212');
+    assert.equal(parsed.paper.proquestAccess, access);
+    assert.equal(parsed.pdfUrl, ''); assert.equal(parsed.paper.pdfReady, false);
+  }
+});
+
+test('当前会话的全文标记与有效 PDF 入口可确认权限，预览优先排除', () => {
+  const h = harness(), api = h.context.ProQuest;
+  const parsed = api.parseDetail(journalDoc({ access: 'available' }), paper().detailUrl);
+  assert.equal(parsed.paper.proquestAccess, 'available');
+  assert.equal(h.context.canDownloadPaper(parsed.paper), true);
+  assert.ok(parsed.pdfUrl);
+  const preview = api.parseDetail(journalDoc({ access: 'preview', download: true }), paper().detailUrl);
+  assert.equal(preview.paper.proquestAccess, 'preview'); assert.equal(preview.pdfUrl, '');
+});
+
+test('已获全文权限文献每次下载仍重查，登录失效后不能复用旧链接', async () => {
+  const h = harness([{ ...paper(), proquestAccess: 'available' }]); let parses = 0;
+  h.context.resolveProquestPaper = async p => {
+    parses++;
+    return parses === 1
+      ? { paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/file?_s=authorized' }
+      : { paper: { ...p, proquestAccess: 'unknown', pdfReady: false, proquestReason: '未确认全文下载权限' }, pdfUrl: '' };
+  };
+  assert.equal(await h.context.downloadPaper(paper().id), 'success');
+  assert.equal(await h.context.downloadPaper(paper().id), 'skipped');
+  assert.equal(h.calls.filter(c=>c.type==='SAVE_DOWNLOAD').length, 1);
+  assert.equal(h.context.canDownloadPaper(h.state.cnkiPapers[0]), false);
+});
+
 // 使用真实事件绑定、队列与状态更新；只替换详情网络和 Chrome 文件 API。
-function retryHarness() {
-  const h = harness([paper(), { ...paper('222'), pdfFailed: true, pdfReady: false }]);
+function retryHarness(access = "open") {
+  const h = harness([{ ...paper(), proquestAccess: access }, { ...paper('222'), pdfFailed: true, pdfReady: false }]);
   h.context.bindEvents();
   h.click = (selector, id = paper().id) => h.el('#paper-list').listeners.click({
     target: { closest: match => match === selector ? { dataset: { id: String(id) } } : null },
@@ -69,8 +174,9 @@ function retryHarness() {
   return h;
 }
 
-test('卡片重试经过事件与队列，公开但缺链接时重新解析并下载，仅处理指定文献', async () => {
-  const h = retryHarness();
+for (const access of ['open', 'available']) {
+test(`卡片重试经过事件与队列，${access} 缺链接时重新解析并下载，仅处理指定文献`, async () => {
+  const h = retryHarness(access);
   await h.failFirst();
   const parsed = [];
   h.context.resolveProquestPaper = async p => {
@@ -85,6 +191,7 @@ test('卡片重试经过事件与队列，公开但缺链接时重新解析并�
   assert.equal(h.state.cnkiPapers[1].pdfReady, false);
   assert.deepEqual(h.calls.filter(c => c.type === 'SAVE_DOWNLOAD').map(c => c.url), ['https://media.proquest.com/media/file?_s=retry-fresh']);
 });
+}
 
 for (const access of ['preview', 'unknown']) {
   test(`卡片重试重新解析为 ${access} 时显示跳过原因，不探测或下载文件`, async () => {
@@ -198,7 +305,7 @@ test('跨页收藏、返回上一页重复添加，保留先前的取消勾选�
   assert.deepEqual(Array.from(h.context.getSelectedIds()), [222]);
 });
 
-test('新站点是独立来源，预览或仅订阅全文不能进入本版下载队列', () => {
+test('新站点是独立来源，预览或未确认权限的记录不能进入下载队列', () => {
   const { context: c } = harness();
   assert.equal(c.isDoiPaper({ ...paper(), doi: '10.1234/test' }), false);
   assert.equal(c.canDownloadPaper(paper()), true);
@@ -267,7 +374,7 @@ test('ProQuest 学位论文导出不误标博士论文，仍可与知网混合�
   assert.match(c.formatBibTeX({ title: '知网论文', source: '博士论文' }), /^@phdthesis/);
 });
 
-test('公开详情请求不带机构 Cookie，原知网请求仍带 Cookie', async () => {
+test('通用请求的匿名选项不带 Cookie，普通请求仍带 Cookie', async () => {
   const source = read('background.js');
   const textFetch = source.slice(source.indexOf('async function handleFetchText'), source.indexOf('// 只读取文件头'));
   const calls = [];
@@ -279,4 +386,21 @@ test('公开详情请求不带机构 Cookie，原知网请求仍带 Cookie', asy
   await c.handleFetchText({ url: 'https://kns.cnki.net/detail' });
   assert.equal(calls[0].credentials, 'omit'); assert.equal(calls[0].cache, 'no-store');
   assert.equal(calls[1].credentials, 'include');
+});
+
+test('ProQuest 期刊及学位论文均使用当前会话并禁用缓存，权限由每次详情与文件校验决定', async () => {
+  const h = harness(), source = read('background.js'), calls = [];
+  let listener;
+  h.context.AbortController = AbortController;
+  h.context.fetch = async (url, options) => {
+    calls.push(options); return { ok: true, status: 200, text: async () => 'fixture', url };
+  };
+  h.chrome.runtime.onMessage = { addListener: fn => { listener = fn; } };
+  vm.runInContext(source.slice(source.indexOf('async function handleFetchText'), source.indexOf('// 只读取文件头')), h.context);
+  vm.runInContext(source.slice(source.indexOf('chrome.runtime.onMessage.addListener')), h.context);
+  const send = docType => new Promise(resolve => listener({ type: 'FETCH_PROQUEST_DOCUMENT', url: paper().detailUrl, docType }, {}, resolve));
+  assert.equal((await send('J')).ok, true);
+  assert.equal((await send('D')).ok, true);
+  assert.equal(calls[0].credentials, 'include'); assert.equal(calls[0].cache, 'no-store');
+  assert.equal(calls[1].credentials, 'include'); assert.equal(calls[1].cache, 'no-store');
 });

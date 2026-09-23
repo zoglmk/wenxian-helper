@@ -20,7 +20,9 @@ async panel => {
   await control('pqMode=%22open%22&fail=false&delay=0');
   if (await panel.locator('#btn-clear').isVisible()) await panel.locator('#btn-clear').click();
   await panel.waitForFunction(() => papers.length === 0);
+  if (!await panel.locator('#input-folder').isVisible()) await panel.locator('.folder-settings summary').click();
   await panel.locator('#input-folder').fill('proquest-fixture');
+  await panel.locator('#btn-save-folder').click();
   await panel.locator('#input-folder').dispatchEvent('change');
   // 保持用户曾开启的 WebVPN，确认它不会改写 ProQuest 媒体链接。
   await panel.evaluate(async () => {
@@ -35,7 +37,7 @@ async panel => {
   const sampleId = await panel.evaluate(async root => (await chrome.tabs.query({})).find(t => t.url?.startsWith(root))?.id, origin);
   const addPage = () => panel.evaluate(id => chrome.tabs.sendMessage(id, { type: 'ADD_ALL_PAGE', useWebVPN: true }), sampleId);
   const first = await addPage();
-  assert(first.added === 1 && first.skipped === 2, 'first page filters preview and unknown access');
+  assert(first.added === 1 && first.skipped === 2, 'first page filters preview and abstract-only entries');
   await panel.bringToFront();
   await panel.waitForFunction(() => papers.length === 1);
   await panel.locator('.paper-card .check').click();

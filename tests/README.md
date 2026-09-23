@@ -1,6 +1,46 @@
 # 回归验证
 
-## v1.3.0 发布前两项补丁（2026-09-23，本次执行）
+## v1.3.0 反馈修复与设置交互（2026-09-23，最新执行）
+
+在前一轮补丁 `3608cc6` 上继续，保留知网原有下载路径、权限范围和全部既有修改。ProQuest 范围经用户追加为学位论文、期刊及当前登录会话可访问的全文；下方历史记录中的“仅公开、匿名详情请求”不再代表本轮实现。功能与文案一起同步现有草稿 PR，仍待用户验收后合并、打 tag 和发布。
+
+### 改动和回归覆盖
+
+- 「添加本页」在回复后读取最新存储快照，显示 `共 40 篇 · 本次新增 20 篇`，重复添加显示新增 0；不依赖存储通知恰好先到达。沿用清空后的任务失效判断。
+- ProQuest 增加期刊 `jnlArticle`、实际页面的“开放阅览”标记、完整作者、卷期页及 DOI。搜索页仅标“全文文献”的学位论文和期刊先收藏待确认，预览和仅摘要跳过；详情和下载阶段才确认权限。期刊按文章类型导出，学位论文沿用原类型。
+- 详情请求使用当前浏览器会话并禁用缓存。允许明确公开全文，或当前详情同时提供全文标记与有效非预览媒体入口的文献；每次下载重新检查权限和新签名，再验证 PDF 响应。退出登录或权限失效会跳过，不触发订购。原重试锁、指定 ID、清空隔离及旧文献兼容保留。
+- 域名说明更新为搜索结果页地址和授权提示；域名、指定文件夹为同级折叠设置，均默认收起。「稳定性」提示改为「自定义域名」。文件夹只有点击「保存」后生效，区分尚未保存、已保存、恢复默认及保存失败；保存过程中继续输入不会被迟到结果覆盖。
+
+先新增计数、期刊解析/收藏用例，修复前 3 项失败；会话请求用例随后复现匿名请求问题，权限确认用例也在实现前失败。新增及扩展用例覆盖真实点击入口、队列和 Chrome 文件 API，不只测试解析函数。此轮比前一轮净增加 **9 项 Node 测试**：计数、期刊元数据/导出、收藏候选、会话权限、权限撤销、带会话无缓存请求、`available` 卡片重试，以及两项文件夹保存状态/失败/并发草稿测试。
+
+### 实际执行结果
+
+| 验证 | 命令 / 脚本 | 通过 / 失败 |
+|---|---|---|
+| Node 自动测试 | `node --test tests/*.test.cjs` | 81 / 0 |
+| 计数与期刊 | `playwright-cli -s=feedback run-code --filename tests/browser-journal-feedback.js` | 5 / 0 |
+| 登录权限本地样例 | `playwright-cli -s=feedback run-code --filename tests/browser-proquest-session.js` | 4 / 0 |
+| 原 ProQuest 场景 | `playwright-cli -s=feedback run-code --filename tests/browser-proquest.js` | 7 / 0 |
+| 前一轮两项补丁 | `playwright-cli -s=feedback run-code --filename tests/browser-release-patch.js` | 9 / 0 |
+| 原有知网、代理及 DOI 集成 | `playwright-cli -s=feedback run-code --filename tests/browser-integration.js` | 10 / 0 |
+| 混合来源队列 | `playwright-cli -s=feedback run-code --filename tests/browser-mixed-download.js` | 1 / 0 |
+| 设置交互与窄侧栏 | `playwright-cli -s=feedback run-code --filename tests/browser-settings.js` | 4 / 0 |
+
+共 40 组浏览器检查，使用独立 Chrome for Testing 153.0.8010.53、CDP 19223、本地 fixture，命令通过 Playwright skill 的 CLI wrapper 执行。新增文件夹保存操作后另外重跑混合队列，确认实际保存目录；其余浏览器脚本同步增加展开和保存步骤。设置检查覆盖 430px 和 320px 宽度、同级标题、默认折叠、草稿不生效、保存反馈、重载保留及留空恢复。实际读回上述通过场景引用的 **20 份 PDF、1 份 CSV**：PDF 文件头、文件尾及单页结构正确，CSV 标题和作者有效。
+
+原旧学位论文 fixture 中用于排除的未知条目改为仅摘要；本轮允许收藏“全文”候选，其权限排除由新的期刊和会话样例覆盖，并未取消预览、未知权限或 HTML 拦截。初次计数脚本在后台标签页的动画帧轮询超时，改用有界定时轮询后通过；登录脚本初次仍命中 Chrome 缓存的旧后台，重新加载扩展后用虚构 `pq_fixture_member` Cookie 完成学位论文/期刊下载、撤销和恢复权限，最后清除虚构 Cookie。失败尝试不计为通过。全部业务及浏览器 JS 语法、Python fixture 语法和 `git diff --check` 通过。
+
+可复跑脚本已入库；本地运行证据在忽略提交的 `output/playwright/feedback-*-results*`、`feedback-*-browser-run*`、`journal-feedback-browser-run.json`、`proquest-session-browser-run.json`、`settings-ui-results.json`、`feedback-final-node-tests.txt` 和 `feedback-files-verified.json`。这些脚本会清空测试清单，禁止在日常浏览器配置运行。
+
+### 真实网站与未执行项目
+
+本轮实际访问用户截图中的公开期刊 [ProQuest 文档 3268524212](https://www.proquest.com/docview/3268524212)，完成收藏、解析和真实 Chrome 下载。插件和 Chrome 均确认成功，磁盘文件核对为 **7,855,693 字节、15 页**；作者 6 人、刊名、卷期页及 DOI 解析正确。自动化等待曾超时，之后单独读回确认下载完成，不能把首次脚本等待写成直接通过。真实访问发生在启用本地映射之前，没有使用机构账号；本轮会话扩展后的公开期刊代码路径与这次真实下载一致。
+
+没有执行真实知网/图书馆账号或真实 ProQuest 机构账号测试，也没有购买、订购操作。真实账号权限不能由 Cookie 样例推断为已验收。原生导出“另存为”对话框本轮未单独重跑，集成测试仍使用测试页自动保存并校验原请求；日常浏览器权限、下载设置及系统代理未修改。
+
+本轮覆盖范围内未发现新增回归。发布前最少手工确认：重新加载扩展并刷新站点；在知网和实际代理各下载一篇；在 ProQuest 公开期刊及有权限的登录页面各下载一篇，确认预览跳过；展开指定文件夹，保存后下载一篇确认目录。真实账号未验收前保持 PR 草稿。
+
+## v1.3.0 发布前两项补丁（2026-09-23，上一轮记录）
 
 基线为 `codex/custom-proxy-domains` / `9ce2cb65f0b8ad275209e7172865cf3f973e659f`，开始时工作区干净。本次只修复 ProQuest 单篇失败重试和知网执行标签页选择，未提交、推送、合并、打 tag 或发布。
 

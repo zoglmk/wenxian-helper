@@ -38,10 +38,10 @@
         });
       }
       const collected = saved.has(paper.proquestId);
-      const label = collected ? "已收藏" : "+ 收藏全文";
+      const label = collected ? "已收藏" : ProQuest.hasFullTextAccess(paper.proquestAccess) ? "+ 收藏全文" : "+ 收藏待确认";
       if (button.textContent !== label) button.textContent = label;
       button.classList.toggle("collected", collected);
-      button.title = collected ? "取消收藏" : "收藏 ProQuest 公开全文";
+      button.title = collected ? "取消收藏" : ProQuest.hasFullTextAccess(paper.proquestAccess) ? "收藏 ProQuest 全文" : "收藏文献，获取链接时确认当前会话的全文下载权限";
     }
   }
   let timer;
@@ -57,7 +57,7 @@
     if (msg.type !== "ADD_ALL_PAGE") return;
     (async () => {
       const { entries, total, skipped } = ProQuest.collect(document, location.href);
-      if (!total) return { ok: false, error: "未找到 ProQuest 结果，请进入搜索结果页或学位论文详情页" };
+      if (!total) return { ok: false, error: "未找到 ProQuest 结果，请进入搜索结果页或论文详情页" };
       const result = await save("add", { items: entries.map(entry => makePaper(entry.paper)) });
       return { ok: true, provider: "proquest", added: result.added, total, eligible: entries.length, skipped };
     })().then(respond).catch(err => respond({ ok: false, error: err.message }));

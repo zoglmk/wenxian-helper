@@ -58,23 +58,69 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(json.dumps(STATE), "application/json")
         if path == "/requests":
             return self.reply(json.dumps(REQUESTS), "application/json")
+        if path.startswith("/counts/") and path.endswith("/search"):
+            prefix = path.removesuffix("/search")
+            rows = ''.join(f'<tr><td class="name"><a class="fz14" href="{prefix}/{i}/kcms/detail">Count fixture {prefix}-{i}</a></td></tr>' for i in range(20))
+            return self.reply(f'<table class="result-table-list">{rows}</table>')
+        if path == "/resultsol/member/1":
+            rows = []
+            for doc_id in ["920001", "920002", "920003"]:
+                publication = '<span class="jnlArticle"><strong>Member Journal</strong> Vol. 2, Iss. 1, (2025): 1-5.</span>' if doc_id == "920002" else '<span class="dissertpub">Member University ProQuest Dissertations &amp; Theses, 2025.</span>'
+                label = "提供预览" if doc_id == "920003" else "全文文献"
+                rows.append(f'<li class="resultItem"><div class="resultHeader"><h3><a href="/docview/{doc_id}/SESSION/1">Member document {doc_id}</a></h3>{publication}'
+                            f'<div class="format-display">{label}</div><a href="/purchase">订购</a></div></li>')
+            return self.reply(f'<ul>{"".join(rows)}</ul>')
+        if path.startswith("/docview/920"):
+            doc_id = path.split("/")[2]
+            member = "pq_fixture_member=1" in self.headers.get("Cookie", "")
+            preview = not member or doc_id == "920003"
+            label = "下载预览" if preview else "下载 PDF"
+            access = "提供预览" if preview else "全文文献"
+            publication = '<span class="jnlArticle"><strong>Member Journal</strong> Vol. 2, Iss. 1, (2025): 1-5.</span>' if doc_id == "920002" else '<span class="dissertpub">Member University ProQuest Dissertations &amp; Theses, 2025.</span>'
+            STATE["pqToken"] += 1
+            return self.reply(f'<ul class="format-wrapper"><li>{access}</li></ul><h1 class="documentTitle">Member document {doc_id}</h1>{publication}'
+                              f'<a class="pdf-download" title="{label}" href="https://media.proquest.com:18543/media/{doc_id}?_s=member{STATE["pqToken"]}">{label}</a><a href="/purchase">订购</a>')
+        if path.startswith("/resultsol/journals/"):
+            page = path.rsplit("/", 1)[-1]
+            ids = ["910001", "910003", "910004", "910006"] if page == "1" else ["910002", "910001"]
+            rows = []
+            for doc_id in ids:
+                label = "提供预览" if doc_id == "910003" else "摘要" if doc_id == "910006" else "全文文献"
+                rows.append(f'<li class="resultItem"><div class="resultHeader"><h3><a href="/docview/{doc_id}/SESSION/{page}">Public journal {doc_id}</a></h3>'
+                            '<span class="scholUnivAuthors"><span class="truncatedAuthor">Cheng, Zhuo; Lu, Xiaoping; 等.</span></span>'
+                            '<span class="jnlArticle"><strong>Fixture Journal</strong><strong>; London</strong> Vol. 7, Iss. 11, (Nov 1, 2025): 2700-2713.</span>'
+                            f'<div class="format-display"><span>{label}</span></div></div></li>')
+            other = "2" if page == "1" else "1"
+            return self.reply(f'<ul>{"".join(rows)}</ul><a id="next-page" href="/resultsol/journals/{other}">第 {other} 页</a>')
         if path.startswith("/resultsol/fixture/"):
             page = path.rsplit("/", 1)[-1]
             ids = ["900001", "900003", "900004"] if page == "1" else ["900002", "900001"]
             rows = []
             for doc_id in ids:
-                access = "提供预览" if doc_id == "900003" else "全文文献" if doc_id == "900004" else "公开论文"
+                access = "提供预览" if doc_id == "900003" else "摘要" if doc_id == "900004" else "公开论文"
                 rows.append(f'<li class="resultItem"><div class="resultHeader"><h3><a href="/docview/{doc_id}/SESSION/{page}?accountid=fixture">Public thesis {doc_id}</a></h3>'
                             '<span class="scholUnivAuthors"><span class="truncatedAuthor">Hammer, John R.</span></span>'
                             '<span class="dissertpub">Fixture University ProQuest Dissertations &amp; Theses, 2026. 123.</span>'
                             f'<div class="format-display"><span>{access}</span></div></div></li>')
             other = "2" if page == "1" else "1"
             return self.reply(f'<ul>{"".join(rows)}</ul><a id="next-page" href="/resultsol/fixture/{other}">第 {other} 页</a>')
-        if path.startswith("/docview/900"):
+        if path.startswith(("/docview/900", "/docview/910")):
             mode, delay = STATE["pqMode"], STATE["pqDelay"]
             time.sleep(delay)
             doc_id = path.split("/")[2]
             STATE["pqToken"] += 1
+            if doc_id.startswith("910"):
+                preview = doc_id == "910003" or mode == "preview"
+                unknown = doc_id == "910004" or mode == "unknown"
+                access = '<span>提供预览</span>' if preview else '<span>全文文献</span>' if unknown else '<span title="开放阅览" aria-label="开放阅览">全文文献</span>'
+                label = "下载预览" if preview else "下载 PDF"
+                href = '/login' if unknown else f'https://media.proquest.com:18543/media/{doc_id}?_s=fixture{STATE["pqToken"]}'
+                link = '' if mode == "missing" else f'<a class="tool-option-link pdf-download" title="{label}" href="{href}">{label}</a>'
+                return self.reply(f'<ul class="format-wrapper"><li>{access}</li><li>学术期刊</li></ul><h1 class="documentTitle">Public journal {doc_id}</h1>'
+                                  '<span class="scholUnivAuthors"><span class="truncatedAuthor">Cheng, Zhuo; Lu, Xiaoping; 等.</span>'
+                                  '<span id="moreAuthors_fixture" style="display:none" class="truncatedAuthor">Cheng, Zhuo; Lu, Xiaoping; Long, Chunlin.</span></span>'
+                                  '<span class="jnlArticle"><strong>Fixture Journal</strong><strong>; London</strong> Vol. 7, Iss. 11, (Nov 1, 2025): 2700-2713.</span>'
+                                  f'<a href="https://doi.org/10.1000/{doc_id}">DOI</a>{link}')
             preview = doc_id == "900003" or mode == "preview"
             label = "Download preview" if preview else "Download PDF"
             notice = "Document preview" if preview else "This graduate work has been published as open access."
@@ -89,7 +135,9 @@ class Handler(BaseHTTPRequestHandler):
                               '<span class="scholUnivAuthors"><span class="truncatedAuthor">Hammer, John R.</span></span>'
                               '<span class="dissertpub">Fixture University ProQuest Dissertations &amp; Theses, 2026. 123.</span>'
                               + link)
-        if path.startswith("/media/900"):
+        if path.startswith(("/media/900", "/media/910", "/media/920")):
+            if path.startswith("/media/920") and "pq_fixture_member=1" not in self.headers.get("Cookie", ""):
+                return self.reply("<html>Please sign in</html>", status=403)
             if STATE["pqMode"] == "html":
                 return self.reply("<html>Service unavailable</html>")
             return self.reply(PDF, "application/pdf", headers={"Content-Disposition": 'attachment; filename="ProQuestDocument.pdf"'})

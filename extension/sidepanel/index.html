@@ -65,7 +65,7 @@
 
       <details class="proxy-settings">
         <summary>图书馆 / 代理域名</summary>
-        <p class="proxy-tip">填写域名或知网页面网址，授权范围包含该域名及其子域名，支持 HTTP / HTTPS，不限端口。</p>
+        <p class="proxy-tip">填写搜索结果页域名或完整地址，授权范围包含该域名及其子域名，支持 HTTP / HTTPS，不限端口。弹出请求权限提示框点击允许即可。</p>
         <div class="proxy-input-row">
           <input id="input-proxy-domain" class="folder-input" aria-label="图书馆或代理域名" placeholder="域名或完整网址" spellcheck="false">
           <button id="btn-add-proxy" class="btn btn-accent btn-sm">授权并添加</button>
@@ -75,11 +75,16 @@
       </details>
 
       <!-- Download folder -->
-      <div class="folder-row">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-        <input type="text" id="input-folder" class="folder-input" placeholder="子文件夹（留空则存默认位置）">
-        <span class="folder-tip" id="folder-tip"></span>
-      </div>
+      <details class="folder-settings">
+        <summary>指定文件夹</summary>
+        <div class="folder-row">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <input type="text" id="input-folder" class="folder-input" aria-label="指定文件夹" placeholder="子文件夹（留空则存默认位置）">
+          <button id="btn-save-folder" class="btn btn-accent btn-sm">保存</button>
+        </div>
+        <div id="folder-status" class="proxy-tip" role="status" aria-live="polite"></div>
+        <div class="folder-tip" id="folder-tip"></div>
+      </details>
 
       <!-- Progress -->
       <div class="progress" id="progress" hidden>

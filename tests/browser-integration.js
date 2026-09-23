@@ -37,7 +37,9 @@ async (panel) => {
   const scripts = await panel.evaluate(() => chrome.scripting.getRegisteredContentScripts());
   assert(scripts.some(script => script.matches.includes('*://*.library.hb.cn/*')), 'Wildcard registration failed');
   results.push({ case: 'full-url-domain-extraction', matches: scripts[0].matches });
+  if (!await panel.locator('#input-folder').isVisible()) await panel.locator('.folder-settings summary').click();
   await panel.locator('#input-folder').fill('integration');
+  await panel.locator('#btn-save-folder').click();
   await panel.evaluate(async () => {
     settings.fetchLevels = false;
     settings.autoOpenOnVerify = false;
