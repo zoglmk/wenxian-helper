@@ -1,5 +1,7 @@
 /* Content Script - CNKI search results page collection + extraction */
 (function () {
+  // 即使用户曾把 ProQuest 加入代理域名，也由独立站点脚本处理。
+  if (/^(?:www\.)?proquest\.com$/i.test(location.hostname)) return;
   if (window.__cnkiHelperLoaded) return;
   window.__cnkiHelperLoaded = true;
 
@@ -93,7 +95,7 @@
   function extractFromRow(linkEl) {
     const title = linkEl.textContent.trim();
     const detailUrl = linkEl.href;
-    let date = "", quote = "0", download = "0", source = "", sourceUrl = "", cookieName = "";
+    let author = "", date = "", quote = "0", download = "0", source = "", sourceUrl = "", cookieName = "";
 
     // Journal catalog page: dd.row structure
     const dd = linkEl.closest("dd.row");
@@ -102,12 +104,13 @@
       const pages = dd.querySelector("span.company")?.textContent?.trim() || "";
       const cb = dd.querySelector("input.cbItem, input[name='CookieName']");
       if (cb) cookieName = cb.value || "";
-      return { title, detailUrl, date: pages, quote, download, source, sourceUrl, author, cookieName };
+      return { title, detailUrl, date: "", pages, quote, download, source, sourceUrl, author, cookieName };
     }
 
     // Search result page: tr or .list-item structure
     const row = linkEl.closest("tr") || linkEl.closest(".list-item");
     if (row) {
+      author = row.querySelector(".author")?.textContent?.trim() || "";
       date = row.querySelector(".date")?.textContent?.trim() || "";
       quote = row.querySelector(".quote")?.textContent?.trim() || "0";
       download = row.querySelector(".download")?.textContent?.trim() || "0";
@@ -116,7 +119,7 @@
       const cb = row.querySelector("input.cbItem, input[name='CookieName']");
       if (cb) cookieName = cb.value || "";
     }
-    return { title, detailUrl, date, quote, download, source, sourceUrl, cookieName };
+    return { title, detailUrl, author, date, quote, download, source, sourceUrl, cookieName };
   }
 
   function convertToWebVPNLink(link, useWebVPN) {
@@ -130,58 +133,36 @@
     return Array.isArray(data.cnkiPapers) ? data.cnkiPapers : [];
   }
 
-  const removedCache = new Map(); // temporarily cache removed papers to preserve fetched data
+  const removedCache = new Map();
+  async function updatePapers(message) {
+    const result = await chrome.runtime.sendMessage({ type: "PAPER_STORE", ...message });
+    if (!result?.ok) throw new Error(result?.error || "保存文献失败");
+    return result;
+  }
 
   async function togglePaper(info) {
-    const papers = await getPapers();
-    const idx = papers.findIndex((p) => p.detailUrl === info.detailUrl);
-    if (idx >= 0) {
-      // Cache the full paper data before removing
-      removedCache.set(info.detailUrl, papers[idx]);
-      papers.splice(idx, 1);
-      await chrome.storage.local.set({ cnkiPapers: papers });
-      return false; // removed
-    }
-    // Restore from cache if previously removed, otherwise create new
+    const data = await chrome.storage.local.get(["cnkiPapers", "cnkiPapersEpoch"]);
+    const existing = (data.cnkiPapers || []).find((p) => p.detailUrl === info.detailUrl);
+    if (existing) removedCache.set(info.detailUrl, existing);
     const cached = removedCache.get(info.detailUrl);
-    if (cached) {
-      removedCache.delete(info.detailUrl);
-      papers.push(cached);
-    } else {
-      papers.push({
-        id: urlId(info.detailUrl),
-        ...info,
-        author: "", pdfLink: "", keywords: "", level: "Wait",
-      });
-    }
-    await chrome.storage.local.set({ cnkiPapers: papers });
-    return true; // added
+    const paper = cached || { id: urlId(info.detailUrl), author: "", pdfLink: "", keywords: "", level: "Wait", ...info };
+    const result = await updatePapers({ action: "toggle", epoch: data.cnkiPapersEpoch || 0, paper });
+    if (result.collected) removedCache.delete(info.detailUrl);
+    return result.collected;
   }
 
   async function addAllOnPage(useWebVPN) {
+    if (!isCnkiPage()) return { ok: false, error: "no_links" };
     const links = getTitleLinks();
-    if (links.length === 0) return { ok: false, error: "no_links" };
-
-    const papers = await getPapers();
-    const existing = new Set(papers.map((p) => p.detailUrl));
-    let added = 0;
-
-    // Iterate in DOM order to maintain page sequence
-    Array.from(links).forEach((link) => {
-      const url = convertToWebVPNLink(link.href, useWebVPN);
-      if (existing.has(url)) return;
+    if (!links.length) return { ok: false, error: "no_links" };
+    const data = await chrome.storage.local.get(["cnkiPapersEpoch"]);
+    const items = Array.from(links, (link) => {
       const info = extractFromRow(link);
-      info.detailUrl = url;
-      papers.push({
-        id: urlId(url), ...info,
-        author: "", pdfLink: "", keywords: "", level: "Wait",
-      });
-      existing.add(url);
-      added++;
+      const detailUrl = convertToWebVPNLink(link.href, useWebVPN);
+      return { id: urlId(detailUrl), author: "", pdfLink: "", keywords: "", level: "Wait", ...info, detailUrl };
     });
-
-    await chrome.storage.local.set({ cnkiPapers: papers });
-    return { ok: true, added, total: links.length };
+    const result = await updatePapers({ action: "add", epoch: data.cnkiPapersEpoch || 0, items });
+    return { ok: true, added: result.added, total: links.length };
   }
 
   // ── Button Injection ──
@@ -209,7 +190,11 @@
         e.preventDefault();
         e.stopPropagation();
         const info = extractFromRow(link);
-        const added = await togglePaper(info);
+        btn.disabled = true;
+        let added;
+        try { added = await togglePaper(info); }
+        catch (err) { btn.title = `收藏失败：${err.message}`; console.error(err); return; }
+        finally { btn.disabled = false; }
         btn.classList.toggle("collected", added);
         btn.textContent = added ? "\u2713" : "+";
         btn.title = added ? "已收藏，点击取消" : "收藏到下载列表";
@@ -238,9 +223,10 @@
   // ── Init ──
   // Detect if this is a CNKI page (direct or via WebVPN)
   function isCnkiPage() {
-    return location.hostname.includes("cnki") ||
-      getTitleLinks().length > 0 ||
-      !!document.querySelector(".result-table-list, #gridTable, #CataLogContent");
+    return !!document.querySelector(".result-table-list, #gridTable, #CataLogContent, .J_list.list") ||
+      // 自定义域名可覆盖图书馆门户；普通页面的 .fz14 字号样式不是知网证据。
+      Array.from(getTitleLinks()).some((link) => /\/kcms\d?\/|[?&](filename|dbcode)=/i.test(link.href)) ||
+      (!!document.querySelector(".wx-tit h1") && !!document.querySelector(".operate-btn, #pdfDown, #cajDown"));
   }
 
   function activate() {
@@ -270,11 +256,14 @@
   // ── Message Handlers ──
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "PING") {
-      sendResponse({ ok: true });
+      const isCnki = isCnkiPage();
+      // 代理页可能在首次检查结束后才加载知网内容，手动操作时再次激活。
+      if (isCnki) activate();
+      sendResponse({ ok: true, isCnki });
       return;
     }
     if (msg.type === "ADD_ALL_PAGE") {
-      addAllOnPage(msg.useWebVPN).then(sendResponse);
+      addAllOnPage(msg.useWebVPN).then(sendResponse).catch((err) => sendResponse({ ok: false, error: err.message }));
       return true;
     }
   });

@@ -1,8 +1,8 @@
 {
   "name": "文献助手",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "manifest_version": 3,
-  "description": "知网文献、硕博论文 PDF 批量下载助手",
+  "description": "知网文献与 ProQuest 学位论文、期刊全文 PDF 批量下载助手",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -20,8 +20,12 @@
     "*://*.cnki.net/*",
     "*://*.edu.cn/*",
     "*://api.unpaywall.org/*",
-    "*://sci.bban.top/*"
+    "*://sci.bban.top/*",
+    "*://www.proquest.com/*",
+    "*://proquest.com/*",
+    "*://media.proquest.com/*"
   ],
+  "optional_host_permissions": ["*://*/*"],
   "background": {
     "service_worker": "background.js"
   },
@@ -35,6 +39,11 @@
         "*://*.edu.cn/*"
       ],
       "js": ["content/main.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://www.proquest.com/*", "*://proquest.com/*"],
+      "js": ["proquest.js", "content/proquest.js"],
       "run_at": "document_idle"
     }
   ],

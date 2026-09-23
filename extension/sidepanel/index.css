@@ -209,15 +209,26 @@ body {
 .btn-ghost:hover { background: var(--c-surface); color: var(--c-text-2); }
 
 /* ── Folder Row ── */
+.proxy-settings { padding: 0 16px 10px; flex-shrink: 0; max-height: 240px; overflow-y: auto; }
+.proxy-settings summary, .folder-settings summary { color: var(--c-text-2); font-size: 12px; cursor: pointer; }
+.proxy-tip { color: var(--c-text-2); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.proxy-input-row { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.proxy-input-row input { min-width: 0; }
+.proxy-domain-list { list-style: none; margin-top: 6px; }
+.proxy-domain-list li { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.proxy-domain-list span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
+
+.folder-settings { padding: 0 16px 10px; flex-shrink: 0; }
 .folder-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 16px 10px;
+  margin-top: 8px;
   color: var(--c-text-3);
 }
 .folder-input {
   flex: 1;
+  min-width: 0;
   height: 26px;
   padding: 0 8px;
   border: 1px solid var(--c-border);
@@ -232,7 +243,7 @@ body {
 .folder-tip {
   font-size: 11px;
   color: #d97706;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* ── Progress ── */
@@ -599,7 +610,7 @@ body {
 .status-success { color: var(--c-success); }
 .status-error { color: var(--c-error); }
 
-.retry-btn {
+.retry-btn, .fetch-retry-btn {
   margin-left: 6px;
   padding: 2px 8px;
   border: 1px solid var(--c-border);
@@ -612,7 +623,7 @@ body {
   transition: all var(--tr);
   font-family: inherit;
 }
-.retry-btn:hover { background: var(--c-surface); border-color: var(--c-text-3); }
+.retry-btn:hover, .fetch-retry-btn:hover { background: var(--c-surface); border-color: var(--c-text-3); }
 
 .failed-tag {
   font-size: 11px;
@@ -1096,3 +1107,4 @@ body {
 
 /* ── Utility ── */
 [hidden] { display: none !important; }
+.pdf-source-proquest { background: #eef2ff; color: #4338ca; }
