@@ -1,5 +1,5 @@
 /* Service Worker - handles networking, downloads, and side panel setup */
-importScripts("proxy-domains.js", "download-tracking.js", "paper-store.js");
+importScripts("proxy-domains.js", "download-tracking.js", "paper-store.js", "proquest.js");
 
 // 动态脚本跨重启保留；启动和外部撤销权限时核对注册状态。
 function syncProxyDomains() {
@@ -11,13 +11,14 @@ chrome.permissions.onRemoved.addListener(syncProxyDomains);
 // Open side panel on extension icon click
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
-async function handleFetchText({ url, referrer, timeoutMs, headers }) {
+async function handleFetchText({ url, referrer, timeoutMs, headers, anonymous = false }) {
   const controller = new AbortController();
   const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     const res = await fetch(url, {
       method: "GET",
-      credentials: "include",
+      credentials: anonymous ? "omit" : "include",
+      cache: anonymous ? "no-store" : "default",
       redirect: "follow",
       referrer: referrer || undefined,
       signal: controller.signal,
@@ -160,6 +161,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handle = async () => {
     try {
       if (msg.type === "PAPER_STORE") return await PaperStore.update(msg);
+      if (msg.type === "FETCH_PROQUEST_DOCUMENT") {
+        const url = ProQuest.documentUrl(msg.url);
+        if (!url) throw new Error("无效的 ProQuest 文档地址");
+        // 本版只支持公开全文，详情请求不使用机构账号 Cookie。
+        return await handleFetchText({ url, timeoutMs: 20000, anonymous: true });
+      }
       if (msg.type === "FETCH_TEXT") return await handleFetchText(msg);
       if (msg.type === "FETCH_PDF_INFO") return await handleFetchPdfInfo(msg);
       if (msg.type === "FETCH_POST") return await handleFetchPost(msg);

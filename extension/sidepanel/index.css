@@ -1105,3 +1105,4 @@ body {
 
 /* ── Utility ── */
 [hidden] { display: none !important; }
+.pdf-source-proquest { background: #eef2ff; color: #4338ca; }

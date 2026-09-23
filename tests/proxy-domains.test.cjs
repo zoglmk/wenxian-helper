@@ -153,6 +153,7 @@ test('拒绝未知操作，不能移除内置域名权限', async () => {
 
 function panelHarness() {
   const h = harness();
+  vm.runInContext(read('proquest.js'), h.context);
   vm.runInContext(panelSource, h.context);
   return h;
 }
@@ -271,9 +272,11 @@ test('后台只接受扩展自身设置页的域名变更，拒绝网页内容�
   assert.deepEqual(h.data.cnkiProxyDomains, [domainA]);
 });
 
-test('扩展仅增加可选域名权限，保留原有自动匹配和下载权限', () => {
+test('保留知网自动匹配和可选域名权限，仅新增 ProQuest 所需站点', () => {
   const manifest = JSON.parse(read('manifest.json'));
   assert.deepEqual(manifest.content_scripts[0].matches, ['*://*.cnki.net/*', '*://*.edu.cn/*']);
-  assert.deepEqual(manifest.host_permissions, ['*://*.cnki.net/*', '*://*.edu.cn/*', '*://api.unpaywall.org/*', '*://sci.bban.top/*']);
+  assert.deepEqual(manifest.host_permissions, ['*://*.cnki.net/*', '*://*.edu.cn/*', '*://api.unpaywall.org/*', '*://sci.bban.top/*', '*://www.proquest.com/*', '*://proquest.com/*', '*://media.proquest.com/*']);
+  assert.deepEqual(manifest.content_scripts[1].js, ['proquest.js', 'content/proquest.js']);
+  assert.deepEqual(manifest.content_scripts[1].matches, ['*://www.proquest.com/*', '*://proquest.com/*']);
   assert.deepEqual(manifest.optional_host_permissions, ['*://*/*']);
 });

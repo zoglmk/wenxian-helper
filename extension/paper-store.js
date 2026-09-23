@@ -1,7 +1,8 @@
 /* Service Worker 内串行合并，保留原有 cnkiPapers 数组格式。 */
 const PaperStore = (() => {
   let pending = Promise.resolve();
-  const samePaper = (a, b) => (a.detailUrl && a.detailUrl === b.detailUrl) ||
+  const samePaper = (a, b) => (a.provider === "proquest" && b.provider === "proquest" && a.proquestId && a.proquestId === b.proquestId) ||
+    (a.detailUrl && a.detailUrl === b.detailUrl) ||
     (a.doi && b.doi && a.doi.toLowerCase() === b.doi.toLowerCase());
   async function apply({ action, epoch, items = [], paper, id }) {
     const data = await chrome.storage.local.get(["cnkiPapers", "cnkiPapersEpoch", "cnkiPapersRevision"]);

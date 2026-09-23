@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 
-STATE = {"fail": False, "delay": 0, "validPdf": False}
+STATE = {"fail": False, "delay": 0, "validPdf": False, "pqMode": "open", "pqToken": 0}
 REQUESTS = []
 # 小型可打开 PDF，便于同时核对文件头和 Chrome 下载完成状态。
 stream = b"BT /F1 12 Tf 50 100 Td (Local regression fixture) Tj ET"
@@ -58,6 +58,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(json.dumps(STATE), "application/json")
         if path == "/requests":
             return self.reply(json.dumps(REQUESTS), "application/json")
+        if path.startswith("/resultsol/fixture/"):
+            page = path.rsplit("/", 1)[-1]
+            ids = ["900001", "900003", "900004"] if page == "1" else ["900002", "900001"]
+            rows = []
+            for doc_id in ids:
+                access = "提供预览" if doc_id == "900003" else "全文文献" if doc_id == "900004" else "公开论文"
+                rows.append(f'<li class="resultItem"><div class="resultHeader"><h3><a href="/docview/{doc_id}/SESSION/{page}?accountid=fixture">Public thesis {doc_id}</a></h3>'
+                            '<span class="scholUnivAuthors"><span class="truncatedAuthor">Hammer, John R.</span></span>'
+                            '<span class="dissertpub">Fixture University ProQuest Dissertations &amp; Theses, 2026. 123.</span>'
+                            f'<div class="format-display"><span>{access}</span></div></div></li>')
+            other = "2" if page == "1" else "1"
+            return self.reply(f'<ul>{"".join(rows)}</ul><a id="next-page" href="/resultsol/fixture/{other}">第 {other} 页</a>')
+        if path.startswith("/docview/900"):
+            doc_id = path.split("/")[2]
+            STATE["pqToken"] += 1
+            preview = doc_id == "900003" or STATE["pqMode"] == "preview"
+            label = "Download preview" if preview else "Download PDF"
+            notice = "Document preview" if preview else "This graduate work has been published as open access."
+            cls = "wt-download-pdf" if doc_id == "900001" else "tool-option-link pdf-download"
+            heading = '<h2 class="unauthdocheader">' if doc_id == "900001" else '<h1 class="documentTitle">'
+            end = '</h2>' if doc_id == "900001" else '</h1>'
+            url = f'https://media.proquest.com:18543/media/{doc_id}?_s=fixture{STATE["pqToken"]}'
+            return self.reply(f'{heading}Public thesis {doc_id}{end}<strong>{notice}</strong>'
+                              '<span class="scholUnivAuthors"><span class="truncatedAuthor">Hammer, John R.</span></span>'
+                              '<span class="dissertpub">Fixture University ProQuest Dissertations &amp; Theses, 2026. 123.</span>'
+                              f'<a class="{cls}" title="{label}" href="{url}">{label}</a>')
+        if path.startswith("/media/900"):
+            if STATE["pqMode"] == "html":
+                return self.reply("<html>Service unavailable</html>")
+            return self.reply(PDF, "application/pdf", headers={"Content-Disposition": 'attachment; filename="ProQuestDocument.pdf"'})
         if path.startswith("/v2/"):
             return self.reply(json.dumps({
                 "title": "<b>DOI fixture</b>", "journal_name": "Fixture journal", "year": 2026,

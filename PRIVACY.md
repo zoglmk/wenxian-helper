@@ -4,7 +4,7 @@ Last updated: 2026-09-23
 
 ## Overview
 
-文献助手 is a Chrome extension that helps users batch download academic papers from CNKI (China National Knowledge Infrastructure). We are committed to protecting your privacy.
+文献助手 is a Chrome extension that helps users batch download academic papers from CNKI (China National Knowledge Infrastructure) and publicly available dissertations and theses from ProQuest. We are committed to protecting your privacy.
 
 ## Data Collection
 
@@ -23,12 +23,14 @@ Your saved list and settings are kept locally. The paper URL or DOI needed for a
 The extension makes network requests solely to provide its core functionality:
 
 - **cnki.net** — to fetch paper detail pages and trigger PDF downloads, using your existing CNKI login session
+- **www.proquest.com / proquest.com** — to read public dissertation metadata and open-access status. Public detail lookups omit institution-session cookies. The saved list retains the document ID and canonical detail URL, without search-session paths or query parameters.
+- **media.proquest.com** — to check a short PDF header and download the public full text using the exact link supplied by ProQuest. Signed media links are refreshed for each download and are not persisted in the extension's paper list or logs. Chrome may retain download URLs in its own download history.
 - **Library / institutional proxy domains** — to access CNKI through your institution; custom domains require your explicit browser permission
 - **api.unpaywall.org** — to look up open-access PDF links for English literature by DOI (Unpaywall is a free, legal open-access database)
 - **sci.bban.top** — when Unpaywall does not return a PDF link, the DOI is included in a request to this third-party PDF endpoint; a short file header is checked before showing the link
 - Various academic repository domains — to retrieve publicly available PDF files
 
-All requests are made on your behalf using your existing browser session. No data from these requests is sent to the extension developer.
+Requests are made on your behalf. CNKI uses your existing browser session; ProQuest public detail lookups omit cookies, while browser downloads and PDF checks may use cookies applicable to the media host. No data from these requests is sent to the extension developer.
 
 ## Permissions Explanation
 
@@ -39,7 +41,7 @@ All requests are made on your behalf using your existing browser session. No dat
 | `scripting` | Inject a script into CNKI pages to trigger downloads (CNKI's download mechanism requires page-context execution) |
 | `sidePanel` | Display the paper management UI in the browser sidebar |
 | `webNavigation` | Detect page redirects to identify download errors (e.g., CAPTCHA pages) |
-| `host_permissions` | Access CNKI and institutional proxy pages where your login session exists |
+| `host_permissions` | Access CNKI, institutional proxy pages, DOI services, and ProQuest public pages / PDF hosts. ProQuest access is limited to `www.proquest.com`, `proquest.com`, and `media.proquest.com`. |
 | `optional_host_permissions` | Let you add a library / proxy domain at runtime. Access covers the domain you approve and its subdomains, over HTTP / HTTPS on any port. Declaring optional patterns does not grant access to all sites. You can remove each custom domain and its permission in the sidebar. |
 
 ## Third-Party Services

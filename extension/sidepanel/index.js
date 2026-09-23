@@ -41,7 +41,12 @@ function acceptPaperSnapshot({ papers: nextPapers, epoch = paperEpoch, revision 
   return true;
 }
 function isDoiPaper(paper) {
+  if (isProquestPaper(paper)) return false;
   return paper.doiImport || !!paper.pdfSource || /^https?:\/\/doi\.org\//i.test(paper.detailUrl || "");
+}
+function isProquestPaper(paper) { return paper?.provider === "proquest"; }
+function canDownloadPaper(paper) {
+  return isProquestPaper(paper) ? paper.proquestAccess === "open" && !!paper.pdfReady : !!paper?.pdfLink;
 }
 function patchPaper(paper, changes, epoch) {
   return mutatePapers("patch", { items: [{ id: paper.id, instance: paper._instance, changes }] }, epoch);
@@ -83,7 +88,8 @@ async function ensureContentScript(tab = null) {
     return true;
   } catch {
     try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/main.js"] });
+      const files = ProQuest.isSite(tab.url) ? ["proquest.js", "content/proquest.js"] : ["content/main.js"];
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files });
       return true;
     } catch { return false; }
   }
@@ -231,6 +237,7 @@ function parseYear(dateStr) {
 }
 
 function detectDocType(paper) {
+  if (isProquestPaper(paper) && paper.docType === "D") return "D";
   const text = (paper.source || "") + " " + (paper.title || "");
   if (/学位论文|博士论文|硕士论文/.test(text)) return "D";
   if (/会议|proceedings/i.test(text)) return "C";
@@ -385,7 +392,8 @@ function formatCitation(paper, style = "gb7714") {
 function formatBibTeX(paper) {
   const year = parseYear(paper.date);
   const docType = detectDocType(paper);
-  const entryType = docType === "D" ? "phdthesis" :
+  // ProQuest 公开页未必提供学位种类，不能把所有学位论文都标为博士论文。
+  const entryType = isProquestPaper(paper) ? "misc" : docType === "D" ? "phdthesis" :
                     docType === "C" ? "inproceedings" :
                     "article";
   const firstAuthor = (paper.author || "").split(/[;；、,,，]/)[0]?.trim() || "Anon";
@@ -401,7 +409,10 @@ function formatBibTeX(paper) {
     const auths = splitAuthors(paper.author).map(escape).join(" and ");
     if (auths) lines.push(`  author = {${auths}},`);
   }
-  if (paper.source) lines.push(`  journal = {${escape(paper.source)}},`);
+  if (isProquestPaper(paper)) {
+    lines.push("  type = {Thesis},");
+    if (paper.source) lines.push(`  school = {${escape(paper.source)}},`);
+  } else if (paper.source) lines.push(`  journal = {${escape(paper.source)}},`);
   if (year) lines.push(`  year = {${year}},`);
   if (paper.volume) lines.push(`  volume = {${escape(paper.volume)}},`);
   if (paper.issue) lines.push(`  number = {${escape(paper.issue)}},`);
@@ -714,6 +725,26 @@ async function downloadAsFile(filename, content, mimeType = "text/plain") {
 }
 
 // ── Fetch PDF Links (enriches papers with pdfLink, author, keywords) ──
+async function resolveProquestPaper(paper) {
+  const res = await sendToBackground({ type: "FETCH_PROQUEST_DOCUMENT", url: paper.detailUrl });
+  if (!res?.ok) throw new Error(`ProQuest 详情获取失败 (${res?.status || "网络异常"})，请稍后重试`);
+  const expected = ProQuest.documentUrl(paper.detailUrl);
+  const finalDocument = ProQuest.documentUrl(res.finalUrl);
+  if (!finalDocument || finalDocument.split("/").pop() !== expected.split("/").pop()) throw new Error("ProQuest 返回了其他页面，请打开论文详情确认后重试");
+  return ProQuest.parseDetail(new DOMParser().parseFromString(res.text, "text/html"), expected);
+}
+
+async function fetchProquestPaper(paper, generation, epoch) {
+  let changes;
+  try {
+    ({ paper: changes } = await resolveProquestPaper(paper));
+  } catch (err) {
+    changes = { pdfReady: false, pdfLink: "", pdfFailed: true, proquestReason: err.message };
+    if (taskCurrent(generation, epoch)) addLog("error", `获取公开全文失败: ${paper.title}`, err.message);
+  }
+  if (taskCurrent(generation, epoch)) await patchPaper(paper, changes, epoch);
+}
+
 async function fetchPdfLinks(ids = null) {
   if (fetchingLinks) { $("#footer-status").textContent = "正在获取链接，请稍候"; return; }
   fetchingLinks = true;
@@ -723,9 +754,9 @@ async function fetchPdfLinks(ids = null) {
 }
 async function performFetchPdfLinks(ids) {
   const generation = taskGeneration, epoch = paperEpoch;
-  const pending = papers.filter((p) => !p.pdfLink && !isDoiPaper(p) && (!ids || ids.includes(p.id))).map((p) => ({ ...p }));
+  const pending = papers.filter((p) => !canDownloadPaper(p) && !isDoiPaper(p) && (!ids || ids.includes(p.id))).map((p) => ({ ...p }));
   if (pending.length === 0) {
-    $("#footer-status").textContent = papers.length ? "没有待解析的知网文献；DOI 文献请到 DOI 导入页重试" : "请先添加文献";
+    $("#footer-status").textContent = papers.length ? "没有待解析的文献；DOI 文献请到 DOI 导入页重试" : "请先添加文献";
     return;
   }
 
@@ -733,6 +764,14 @@ async function performFetchPdfLinks(ids) {
   setProgress(0, `获取链接 0/${pending.length}`);
 
   async function fetchOne(paper) {
+    if (isProquestPaper(paper)) {
+      await fetchProquestPaper(paper, generation, epoch);
+      if (taskCurrent(generation, epoch)) {
+        done++;
+        setProgress(Math.round((done / pending.length) * 100), `获取链接 ${done}/${pending.length}`);
+      }
+      return;
+    }
     const before = { ...paper };
     try {
       const res = await sendToBackground({ type: "FETCH_TEXT", url: paper.detailUrl, timeoutMs: 20000 });
@@ -925,6 +964,7 @@ async function downloadPaper(id) {
 async function performDownload(id, generation) {
   const setState = (...args) => { if (taskCurrent(generation)) setDownloadState(...args); };
   const paper = papers.find((p) => p.id === id);
+  if (isProquestPaper(paper)) return downloadProquestPaper(paper, generation);
   if (!paper?.pdfLink) return "fail";
   if (!safeHttpUrl(paper.pdfLink)) { setState(id, "error", "下载地址必须为 HTTP / HTTPS"); return "fail"; }
 
@@ -1116,6 +1156,50 @@ async function performDownload(id, generation) {
   }
 }
 
+// ProQuest 单独刷新公开详情和媒体签名，不改写 URL，不进入知网 iframe 路径。
+async function downloadProquestPaper(paper, generation) {
+  const epoch = paperEpoch;
+  const current = () => taskCurrent(generation, epoch) && papers.some(p => p.id === paper.id && p._instance === paper._instance);
+  if (!current()) return "cancelled";
+  setDownloadState(paper.id, "downloading");
+  try {
+    const resolved = await resolveProquestPaper(paper);
+    if (!current()) return "cancelled";
+    await patchPaper(paper, resolved.paper, epoch);
+    if (!current()) return "cancelled";
+    if (!resolved.pdfUrl && resolved.paper.proquestAccess !== "open") {
+      setDownloadState(paper.id, "skipped", resolved.paper.proquestReason);
+      return "skipped";
+    }
+    if (!resolved.pdfUrl) throw new Error(resolved.paper.proquestReason);
+    const probe = await sendToBackground({ type: "FETCH_PDF_INFO", url: resolved.pdfUrl, timeoutMs: 15000 });
+    if (!current()) return "cancelled";
+    if (!probe?.ok || !probe.isPdf) throw new Error("ProQuest 未返回有效 PDF，请稍后重试");
+    const result = await sendToBackground({ type: "SAVE_DOWNLOAD", url: resolved.pdfUrl,
+      filename: createSafeFilename(resolved.paper.title || paper.title), useFolder: true });
+    if (!current()) return "cancelled";
+    if (!result?.ok || result.downloadId == null) throw new Error("ProQuest 下载未启动，请检查浏览器下载设置后重试");
+    activeDownloadWait = waitForDownloadById(result.downloadId);
+    const outcome = await activeDownloadWait;
+    activeDownloadWait = null;
+    if (!current()) return "cancelled";
+    if (outcome !== "success") throw new Error(outcome);
+    const [download] = await chrome.downloads.search({ id: result.downloadId });
+    if (!current()) return "cancelled";
+    if (!download || /(?:html|json|xml)/i.test(download.mime || "")) throw new Error("下载内容不是 PDF，请检查 Chrome 下载列表后重试");
+    setDownloadState(paper.id, "success");
+    consecutiveFails = 0;
+    return "success";
+  } catch (err) {
+    if (!current()) return "cancelled";
+    setDownloadState(paper.id, "error", err.message);
+    // 不记录媒体签名、Cookie 或用户会话参数。
+    addLog("error", `ProQuest 下载失败: ${paper.title}`, `${err.message}\n详情页: ${paper.detailUrl}`);
+    consecutiveFails++;
+    return "fail";
+  } finally { activeDownloadWait = null; }
+}
+
 // 两种下载方式使用同一完成判定；监听器在任何结束分支都会清理。
 function waitForDownloadById(downloadId, timeoutMs = 120000) {
   return DownloadTracking.wait({ id: downloadId, completeTimeout: timeoutMs });
@@ -1149,7 +1233,7 @@ async function processDownloadQueue(ids) {
     }
     if (downloadState[id]?.status === "success") continue;
     const paper = papers.find((p) => p.id === id);
-    if (!paper?.pdfLink) continue;
+    if (!canDownloadPaper(paper)) continue;
     const r = await downloadPaper(id);
     if (!taskCurrent(generation)) break;
     if (r === "verify" || r === "quota" || r === "blocked") {
@@ -1176,7 +1260,7 @@ async function processDownloadQueue(ids) {
 
 async function downloadSelected() {
   const selected = getSelectedIds();
-  const ready = papers.filter((p) => selected.includes(p.id) && p.pdfLink).map((p) => p.id);
+  const ready = papers.filter((p) => selected.includes(p.id) && canDownloadPaper(p)).map((p) => p.id);
   const skipped = selected.length - ready.length;
   if (skipped) addLog("info", `跳过 ${skipped} 篇无下载链接的文献`, "这些文献仍可勾选导出");
   if (!ready.length) { $("#footer-status").textContent = "所选文献暂无下载链接，可先获取链接或直接导出"; return; }
@@ -1185,9 +1269,9 @@ async function downloadSelected() {
 
 async function retryFailed() {
   const failed = papers.filter((p) => p.pdfFailed || downloadState[p.id]?.status === "error");
-  const parseIds = failed.filter((p) => !p.pdfLink && !isDoiPaper(p)).map((p) => p.id);
+  const parseIds = failed.filter((p) => !canDownloadPaper(p) && !isDoiPaper(p)).map((p) => p.id);
   if (parseIds.length) await fetchPdfLinks(parseIds);
-  const failedIds = papers.filter((p) => p.pdfLink && failed.some((f) => f.id === p.id)).map((p) => p.id);
+  const failedIds = papers.filter((p) => canDownloadPaper(p) && failed.some((f) => f.id === p.id)).map((p) => p.id);
   if (failedIds.length) await runDownloadQueue(failedIds);
   else if (failed.some((p) => isDoiPaper(p))) $("#footer-status").textContent = "请在 DOI 导入页再次提交失败 DOI 以重试";
 }
@@ -1279,12 +1363,13 @@ function renderList() {
         <div class="empty-title">使用说明</div>
         <div class="empty-tip">温馨提示：建议每次下载不超过 20 篇，下载完成后间隔一段时间再继续，避免触发知网访问限制。</div>
         <div class="empty-steps">
-          <div class="empty-step"><span class="step-num">1</span>在知网搜索结果页或期刊目录页，点击「添加本页」收藏文献</div>
+          <div class="empty-step"><span class="step-num">1</span>在知网或 ProQuest 结果页点击「添加本页」，可翻页继续收藏</div>
           <div class="empty-step"><span class="step-num">2</span>点击「获取链接」解析 PDF 下载地址</div>
           <div class="empty-step"><span class="step-num">3</span>勾选文献后点击「下载」批量下载 PDF</div>
         </div>
         <div class="empty-new">
-          <div class="empty-new-title">v1.2 新功能</div>
+          <div class="empty-new-title">功能提示</div>
+          <div class="empty-new-item"><span class="empty-new-tag">ProQuest</span>支持公开学位论文全文、跨页收藏和批量下载，预览及购买项跳过</div>
           <div class="empty-new-item"><span class="empty-new-tag">DOI</span>切到「DOI导入」标签页，粘贴 DOI 列表自动获取英文文献下载链接</div>
           <div class="empty-new-item"><span class="empty-new-tag">文件夹</span>指定下载子文件夹，所有文献自动归类保存</div>
           <div class="empty-new-item"><span class="empty-new-tag">稳定性</span>修复批量下载中途失败、支持学校 WebVPN 代理下载</div>
@@ -1307,7 +1392,7 @@ function createPaperCard(paper) {
 
   const state = downloadState[paper.id];
   if (state) card.dataset.status = state.status;
-  const hasPdf = !!paper.pdfLink;
+  const hasPdf = canDownloadPaper(paper);
   if (!hasPdf && !state) card.dataset.status = "pending";
 
   const levelHtml = renderLevel(paper.level);
@@ -1340,7 +1425,7 @@ function createPaperCard(paper) {
       ${abstractHtml}
       <div class="paper-bottom">
         <div class="paper-stats">
-          ${paper.pdfSource ? `<span class="pdf-source-tag pdf-source-${paper.pdfSource === "Unpaywall" ? "unpaywall" : "sci-hub"}">${escapeHtml(paper.pdfSource)}</span>` : `<span>被引 <strong>${escapeHtml(paper.quote || 0)}</strong></span><span>下载 <strong>${escapeHtml(paper.download || 0)}</strong></span>`}
+          ${isProquestPaper(paper) ? `<span class="pdf-source-tag pdf-source-proquest">ProQuest · ${paper.proquestAccess === "open" ? "公开全文" : "未确认公开全文"}</span>` : paper.pdfSource ? `<span class="pdf-source-tag pdf-source-${paper.pdfSource === "Unpaywall" ? "unpaywall" : "sci-hub"}">${escapeHtml(paper.pdfSource)}</span>` : `<span>被引 <strong>${escapeHtml(paper.quote || 0)}</strong></span><span>下载 <strong>${escapeHtml(paper.download || 0)}</strong></span>`}
           ${levelHtml}
         </div>
         <div class="paper-action" data-id="${escapeHtml(paper.id)}">
@@ -1361,13 +1446,15 @@ function renderLevel(level) {
 function renderAction(id, pdfLink) {
   const state = downloadState[id];
   if (!state) {
-    if (pdfLink) return `<button class="dl-btn" data-id="${escapeHtml(id)}">PDF</button>`;
     const paper = papers.find((p) => p.id === id);
+    if (canDownloadPaper(paper)) return `<button class="dl-btn" data-id="${escapeHtml(id)}">PDF</button>`;
+    if (isProquestPaper(paper) && paper.proquestReason) return `<span class="failed-tag" title="${escapeHtml(paper.proquestReason)}">${paper.pdfFailed ? "获取失败" : "本版跳过"}</span>${paper.pdfFailed ? `<button class="fetch-retry-btn" data-id="${escapeHtml(id)}">重试解析</button>` : ""}`;
     if (paper?.pdfFailed) return `<span class="failed-tag">未找到链接</span>${isDoiPaper(paper) ? "" : `<button class="fetch-retry-btn" data-id="${escapeHtml(id)}">重试解析</button>`}`;
     return `<span class="pending-tag">待获取链接</span>`;
   }
   if (state.status === "downloading") return `<span class="status status-downloading"><span class="spinner"></span>下载中</span>`;
   if (state.status === "success") return `<span class="status status-success">&#10003; 完成</span>`;
+  if (state.status === "skipped") return `<span class="pending-tag" title="${escapeHtml(state.error)}">本版跳过</span>`;
   if (state.status === "error") return `<span class="status status-error" title="${escapeHtml(state.error)}">&#10007; 失败</span><button class="retry-btn" data-id="${escapeHtml(id)}">重试</button>`;
   return "";
 }
@@ -1404,7 +1491,7 @@ function restoreChecks() {
 
 function updateFooter() {
   const total = papers.length;
-  const ready = papers.filter((p) => p.pdfLink).length;
+  const ready = papers.filter(canDownloadPaper).length;
   const selected = getSelectedIds().length;
   const selectAll = $("#select-all");
   selectAll.checked = total > 0 && selected === total;
@@ -1849,11 +1936,11 @@ function bindEvents() {
   // Add all papers from current page
   $("#btn-add-page").addEventListener("click", async () => {
     const ok = await ensureContentScript();
-    if (!ok) { $("#footer-status").textContent = "请先进入知网搜索结果页，点击浏览器工具栏的文献助手图标后重试"; return; }
+    if (!ok) { $("#footer-status").textContent = "请先进入知网或 ProQuest 页面，点击浏览器工具栏的文献助手图标后重试"; return; }
     try {
       const result = await sendToContent({ type: "ADD_ALL_PAGE", useWebVPN: settings.useWebVPN });
       if (!result?.ok) {
-        $("#footer-status").textContent = result?.error === "no_links" ? "当前页未找到文献" : "添加失败";
+        $("#footer-status").textContent = result?.error === "no_links" ? "当前页未找到文献" : `添加失败：${result?.error || "未知原因"}`;
         return;
       }
       // Reset sort to default (insertion order) after adding
@@ -1863,7 +1950,9 @@ function bindEvents() {
         saveSort();
       }
       // Storage change will trigger renderList via onChanged listener
-      $("#footer-status").textContent = result.added > 0
+      $("#footer-status").textContent = result.provider === "proquest"
+        ? `新增 ${result.added} 篇公开论文，本页跳过 ${result.skipped} 条；可翻页继续添加`
+        : result.added > 0
         ? `已添加 ${result.added} 篇 (本页共 ${result.total} 篇)`
         : `本页 ${result.total} 篇均已在列表中`;
     } catch (err) {
@@ -2026,7 +2115,7 @@ function setupTipQrFallback() {
 
 // ── Update Notes ──
 const CURRENT_VERSION = chrome.runtime.getManifest().version;
-const UPDATE_NOTE = `v${CURRENT_VERSION} 更新：支持自定义代理域名，修复下载状态、清单同步、勾选导出和 DOI 重试`;
+const UPDATE_NOTE = `v${CURRENT_VERSION} 更新：新增 ProQuest 公开学位论文，支持跨页收藏、勾选和批量下载`;
 
 async function checkUpdate() {
   const data = await chrome.storage.local.get(["lastSeenVersion"]);

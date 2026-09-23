@@ -1,5 +1,7 @@
 /* Content Script - CNKI search results page collection + extraction */
 (function () {
+  // 即使用户曾把 ProQuest 加入代理域名，也由独立站点脚本处理。
+  if (/^(?:www\.)?proquest\.com$/i.test(location.hostname)) return;
   if (window.__cnkiHelperLoaded) return;
   window.__cnkiHelperLoaded = true;
 
