@@ -10,7 +10,7 @@ async (panel) => {
    else await route.fulfill({contentType:'text/html; charset=utf-8',body:'<div class="operate-btn"><a href="/state/pdf">Download PDF</a></div><div class="author"><a>First Author</a></div>'});
   }else await route.fulfill({contentType:'text/html; charset=utf-8',body:'<table class="result-table-list"><tr><td class="name"><a class="fz14" href="/state/kcms/detail">State regression</a></td><td class="author">Original Author</td></tr></table>'});
  });
- await panel.locator('#btn-clear').click();
+ if (await panel.locator('#btn-clear').isVisible()) await panel.locator('#btn-clear').click();
  const sample=await context.newPage();await sample.goto(origin+'/state/search');await sample.locator('.cnki-h-btn').click();
  await panel.locator('.paper-card').waitFor();
  let record=await panel.evaluate(()=>papers[0]);
@@ -33,7 +33,7 @@ async (panel) => {
  await panel.evaluate(async()=>{await patchPaper(papers[0],{pdfLink:'',pdfFailed:true});});
  await panel.waitForFunction(()=>!papers[0]?.pdfLink);
  const requested=new Promise(r=>entered=r);const fetching=panel.evaluate(()=>fetchPdfLinks());await requested;
- await panel.locator('#btn-clear').click();release();await fetching;
+ if (await panel.locator('#btn-clear').isVisible()) await panel.locator('#btn-clear').click();release();await fetching;
  const empty=await panel.evaluate(async()=>({papers,stored:(await chrome.storage.local.get('cnkiPapers')).cnkiPapers}));
  if(empty.papers.length||empty.stored.length)throw new Error('Stale write resurrected papers');
  await sample.close();await panel.bringToFront();

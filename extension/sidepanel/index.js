@@ -3,6 +3,7 @@
 // ── State ──
 let papers = [];
 let paperEpoch = 0;
+let paperRevision = 0;
 let taskGeneration = 0;
 let activeDownloadWait = null;
 let fetchingLinks = false;
@@ -24,7 +25,23 @@ async function mutatePapers(action, extra = {}, epoch = paperEpoch) {
     if (result?.code === "stale") return false;
     throw new Error(result?.error || "保存清单失败");
   }
+  acceptPaperSnapshot(result);
   return result;
+}
+function acceptPaperSnapshot({ papers: nextPapers, epoch = paperEpoch, revision = paperRevision }) {
+  if (revision < paperRevision) return false;
+  paperRevision = revision;
+  if (epoch !== paperEpoch) {
+    paperEpoch = epoch;
+    cancelTasks();
+    Object.keys(downloadState).forEach((id) => delete downloadState[id]);
+    updateResumeButton();
+  }
+  papers = nextPapers || [];
+  return true;
+}
+function isDoiPaper(paper) {
+  return paper.doiImport || !!paper.pdfSource || /^https?:\/\/doi\.org\//i.test(paper.detailUrl || "");
 }
 function patchPaper(paper, changes, epoch) {
   return mutatePapers("patch", { items: [{ id: paper.id, instance: paper._instance, changes }] }, epoch);
@@ -134,13 +151,14 @@ async function addProxyDomain() {
 
 // ── Storage ──
 async function loadSettings() {
-  const data = await chrome.storage.local.get(["useWebVPN", "fetchLevels", "autoOpenOnVerify", "downloadFolder", "cnkiPapers", "cnkiPapersEpoch", "cnkiSort"]);
+  const data = await chrome.storage.local.get(["useWebVPN", "fetchLevels", "autoOpenOnVerify", "downloadFolder", "cnkiPapers", "cnkiPapersEpoch", "cnkiPapersRevision", "cnkiSort"]);
   settings.useWebVPN = data.useWebVPN ?? false;
   settings.fetchLevels = data.fetchLevels ?? true;
   settings.autoOpenOnVerify = data.autoOpenOnVerify ?? true;
   settings.downloadFolder = data.downloadFolder ?? "";
   papers = Array.isArray(data.cnkiPapers) ? data.cnkiPapers : [];
   paperEpoch = data.cnkiPapersEpoch || 0;
+  paperRevision = data.cnkiPapersRevision || 0;
   if (data.cnkiSort) { sortField = data.cnkiSort.field || ""; sortDir = data.cnkiSort.dir || "desc"; }
 }
 
@@ -162,13 +180,13 @@ function addLog(level, title, detail = "") {
 function renderLogEntry(entry) {
   const list = $("#log-list");
   if (!list) return;
-  const escaped = entry.detail.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escaped = escapeHtml(entry.detail);
   const el = document.createElement("div");
   el.className = "log-entry log-error";
   el.innerHTML = `
     <div class="log-entry-header">
-      <span class="log-time">${entry.time}</span>
-      <span class="log-msg">${entry.title}</span>
+      <span class="log-time">${escapeHtml(entry.time)}</span>
+      <span class="log-msg">${escapeHtml(entry.title)}</span>
       <button class="log-copy-btn" title="复制详情">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
       </button>
@@ -191,6 +209,14 @@ function updateLogBadge() {
 }
 
 // ── Utils ──
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function safeHttpUrl(value) {
+  try { return /^https?:$/.test(new URL(value).protocol) ? String(value) : ""; }
+  catch { return ""; }
+}
+
 function createSafeFilename(name, maxLen = 200) {
   let s = name.replace(/[\/:*?"<>|\\]/g, "_").replace(/\s+/g, " ").trim();
   return (s.length > maxLen ? s.substring(0, maxLen) : s) + ".pdf";
@@ -216,8 +242,8 @@ function cleanAuthorName(name) {
   if (!name) return "";
   return String(name)
     .replace(/\d+/g, "")
-    .replace(/[\s　 ]+/g, "")
-    .replace(/[,，;；、.。]+$/, "")
+    .replace(/[\s　 ]+/g, " ")
+    .replace(/[,，;；、。]+$/, "")
     .trim();
 }
 
@@ -696,7 +722,7 @@ async function fetchPdfLinks(ids = null) {
 }
 async function performFetchPdfLinks(ids) {
   const generation = taskGeneration, epoch = paperEpoch;
-  const pending = papers.filter((p) => !p.pdfLink && !p.doiImport && (!ids || ids.includes(p.id))).map((p) => ({ ...p }));
+  const pending = papers.filter((p) => !p.pdfLink && !isDoiPaper(p) && (!ids || ids.includes(p.id))).map((p) => ({ ...p }));
   if (pending.length === 0) {
     $("#footer-status").textContent = papers.length ? "没有待解析的知网文献；DOI 文献请到 DOI 导入页重试" : "请先添加文献";
     return;
@@ -759,6 +785,7 @@ async function performFetchPdfLinks(ids) {
           } catch {}
         }
 
+        pdfLink = safeHttpUrl(pdfLink);
         if (pdfLink) { paper.pdfLink = pdfLink; paper.pdfFailed = false; }
 
         // Author extraction. Prefer per-anchor iteration: detail pages render
@@ -898,6 +925,7 @@ async function performDownload(id, generation) {
   const setState = (...args) => { if (taskCurrent(generation)) setDownloadState(...args); };
   const paper = papers.find((p) => p.id === id);
   if (!paper?.pdfLink) return "fail";
+  if (!safeHttpUrl(paper.pdfLink)) { setState(id, "error", "下载地址必须为 HTTP / HTTPS"); return "fail"; }
 
   setState(id, "downloading");
 
@@ -1156,15 +1184,15 @@ async function downloadSelected() {
 
 async function retryFailed() {
   const failed = papers.filter((p) => p.pdfFailed || downloadState[p.id]?.status === "error");
-  const parseIds = failed.filter((p) => !p.pdfLink && !p.doiImport).map((p) => p.id);
+  const parseIds = failed.filter((p) => !p.pdfLink && !isDoiPaper(p)).map((p) => p.id);
   if (parseIds.length) await fetchPdfLinks(parseIds);
   const failedIds = papers.filter((p) => p.pdfLink && failed.some((f) => f.id === p.id)).map((p) => p.id);
   if (failedIds.length) await runDownloadQueue(failedIds);
-  else if (failed.some((p) => p.doiImport)) $("#footer-status").textContent = "请在 DOI 导入页再次提交失败 DOI 以重试";
+  else if (failed.some((p) => isDoiPaper(p))) $("#footer-status").textContent = "请在 DOI 导入页再次提交失败 DOI 以重试";
 }
 
 async function resumeDownload() {
-  if (pendingResumeIds.length === 0) return;
+  if (downloadQueueBusy || downloadBusy || pendingResumeIds.length === 0) return;
   const ids = [...pendingResumeIds];
   pendingResumeIds = [];
   $("#footer-status").textContent = "继续下载中...";
@@ -1282,39 +1310,39 @@ function createPaperCard(paper) {
   if (!hasPdf && !state) card.dataset.status = "pending";
 
   const levelHtml = renderLevel(paper.level);
-  const kwHtml = paper.keywords ? paper.keywords.split(",").map((k) => `<span class="kw-tag">${k}</span>`).join("") : "";
+  const kwHtml = paper.keywords ? String(paper.keywords).split(",").map((k) => `<span class="kw-tag">${escapeHtml(k)}</span>`).join("") : "";
 
-  const abstractHtml = paper.abstract ? `<div class="paper-abstract" hidden>${paper.abstract}</div>` : "";
+  const abstractHtml = paper.abstract ? `<div class="paper-abstract" hidden>${escapeHtml(paper.abstract)}</div>` : "";
   const hasAbstract = !!paper.abstract;
 
   card.innerHTML = `
     <label class="check">
-      <input type="checkbox" class="paper-check" data-id="${paper.id}" ${paper.selected === false ? "" : "checked"}>
+      <input type="checkbox" class="paper-check" data-id="${escapeHtml(paper.id)}" ${paper.selected === false ? "" : "checked"}>
       <span class="check-box"></span>
     </label>
     <div class="paper-body">
       <div class="paper-title-row">
-        <div class="paper-title" title="${paper.title.replace(/"/g, "&quot;")}">${paper.title}</div>
+        <div class="paper-title" title="${escapeHtml(paper.title)}">${escapeHtml(paper.title)}</div>
         <div class="paper-title-actions">
-          ${hasAbstract ? `<button class="icon-btn abstract-toggle-btn" data-id="${paper.id}" title="查看摘要"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>` : ""}
-          <button class="icon-btn copy-info-btn" data-id="${paper.id}" title="复制文献信息"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button>
+          ${hasAbstract ? `<button class="icon-btn abstract-toggle-btn" data-id="${escapeHtml(paper.id)}" title="查看摘要"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>` : ""}
+          <button class="icon-btn copy-info-btn" data-id="${escapeHtml(paper.id)}" title="复制文献信息"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button>
         </div>
       </div>
       <div class="paper-meta">
-        ${paper.author ? `<span class="author">${splitAuthors(paper.author).join(";")}</span><span class="dot">&middot;</span>` : ""}
-        ${paper.source ? `<span>${paper.source}</span><span class="dot">&middot;</span>` : ""}
-        <span>${paper.date || "无日期"}</span>
+        ${paper.author ? `<span class="author">${escapeHtml(splitAuthors(paper.author).join(";"))}</span><span class="dot">&middot;</span>` : ""}
+        ${paper.source ? `<span>${escapeHtml(paper.source)}</span><span class="dot">&middot;</span>` : ""}
+        <span>${escapeHtml(paper.date || "无日期")}</span>
       </div>
       ${paper.doi && paper.pdfSource
-        ? `<div class="paper-doi">DOI: <a href="https://doi.org/${paper.doi}" target="_blank">${paper.doi}</a></div>`
-        : paper.detailUrl ? `<div class="paper-doi"><a href="${paper.detailUrl}" target="_blank">查看详情 →</a></div>` : ""}
+        ? `<div class="paper-doi">DOI: <a href="https://doi.org/${escapeHtml(encodeURI(paper.doi))}" target="_blank" rel="noopener noreferrer">${escapeHtml(paper.doi)}</a></div>`
+        : safeHttpUrl(paper.detailUrl) ? `<div class="paper-doi"><a href="${escapeHtml(safeHttpUrl(paper.detailUrl))}" target="_blank" rel="noopener noreferrer">查看详情 →</a></div>` : ""}
       ${abstractHtml}
       <div class="paper-bottom">
         <div class="paper-stats">
-          ${paper.pdfSource ? `<span class="pdf-source-tag pdf-source-${paper.pdfSource.toLowerCase()}">${paper.pdfSource}</span>` : `<span>被引 <strong>${paper.quote || 0}</strong></span><span>下载 <strong>${paper.download || 0}</strong></span>`}
+          ${paper.pdfSource ? `<span class="pdf-source-tag pdf-source-${paper.pdfSource === "Unpaywall" ? "unpaywall" : "sci-hub"}">${escapeHtml(paper.pdfSource)}</span>` : `<span>被引 <strong>${escapeHtml(paper.quote || 0)}</strong></span><span>下载 <strong>${escapeHtml(paper.download || 0)}</strong></span>`}
           ${levelHtml}
         </div>
-        <div class="paper-action" data-id="${paper.id}">
+        <div class="paper-action" data-id="${escapeHtml(paper.id)}">
           ${renderAction(paper.id, paper.pdfLink)}
         </div>
       </div>
@@ -1326,20 +1354,20 @@ function createPaperCard(paper) {
 
 function renderLevel(level) {
   if (!settings.fetchLevels || !level || level === "Wait" || level === "无") return "";
-  return level.split("/").map((l) => `<span class="level-tag">${l}</span>`).join(" ");
+  return String(level).split("/").map((l) => `<span class="level-tag">${escapeHtml(l)}</span>`).join(" ");
 }
 
 function renderAction(id, pdfLink) {
   const state = downloadState[id];
   if (!state) {
-    if (pdfLink) return `<button class="dl-btn" data-id="${id}">PDF</button>`;
+    if (pdfLink) return `<button class="dl-btn" data-id="${escapeHtml(id)}">PDF</button>`;
     const paper = papers.find((p) => p.id === id);
-    if (paper?.pdfFailed) return `<span class="failed-tag">未找到链接</span>${paper.doiImport ? "" : `<button class="fetch-retry-btn" data-id="${id}">重试解析</button>`}`;
+    if (paper?.pdfFailed) return `<span class="failed-tag">未找到链接</span>${isDoiPaper(paper) ? "" : `<button class="fetch-retry-btn" data-id="${escapeHtml(id)}">重试解析</button>`}`;
     return `<span class="pending-tag">待获取链接</span>`;
   }
   if (state.status === "downloading") return `<span class="status status-downloading"><span class="spinner"></span>下载中</span>`;
   if (state.status === "success") return `<span class="status status-success">&#10003; 完成</span>`;
-  if (state.status === "error") return `<span class="status status-error" title="${state.error}">&#10007; 失败</span><button class="retry-btn" data-id="${id}">重试</button>`;
+  if (state.status === "error") return `<span class="status status-error" title="${escapeHtml(state.error)}">&#10007; 失败</span><button class="retry-btn" data-id="${escapeHtml(id)}">重试</button>`;
   return "";
 }
 
@@ -1613,7 +1641,7 @@ const BROWSER_HEADERS = {
 function parseDois(text) {
   const pattern = /10\.[0-9]{4,9}\/[-._;()/:a-zA-Z0-9]+/g;
   const matches = text.match(pattern) || [];
-  return [...new Set(matches)]; // 去重
+  return [...new Map(matches.map((doi) => [doi.toLowerCase(), doi])).values()]; // DOI 不区分大小写
 }
 
 async function fetchPdfByDoi(doi) {
@@ -1632,9 +1660,9 @@ async function fetchPdfByDoi(doi) {
       meta.title = data.title || "";
       meta.source = data.journal_name || "";
       meta.date = data.year ? String(data.year) : "";
-      meta.author = (data.z_authors || []).map((a) => a.family || "").filter(Boolean).join("; ");
+      meta.author = (data.z_authors || []).map((a) => [a.given, a.family].filter(Boolean).join(" ") || a.name || "").filter(Boolean).join("; ");
       const oaUrl = data?.best_oa_location?.url_for_pdf;
-      if (oaUrl) { pdfLink = oaUrl; pdfSource = "Unpaywall"; }
+      if (safeHttpUrl(oaUrl)) { pdfLink = oaUrl; pdfSource = "Unpaywall"; }
     }
   } catch {}
 
@@ -1642,9 +1670,9 @@ async function fetchPdfByDoi(doi) {
 
   // Step 2: bban.top 直链兜底
   try {
-    const bbanUrl = `https://sci.bban.top/pdf/${doi}.pdf?download=true`;
-    const res = await sendToBackground({ type: "FETCH_TEXT", url: bbanUrl, timeoutMs: 10000, headers: BROWSER_HEADERS });
-    if (res?.ok && res.text && !res.text.trimStart().startsWith("<")) {
+    const bbanUrl = `https://sci.bban.top/pdf/${encodeURI(doi).replace(/\?/g, "%3F").replace(/#/g, "%23")}.pdf?download=true`;
+    const res = await sendToBackground({ type: "FETCH_PDF_INFO", url: bbanUrl, timeoutMs: 10000, headers: BROWSER_HEADERS });
+    if (res?.ok && res.isPdf) {
       pdfLink = bbanUrl;
       pdfSource = "Sci-Hub";
     }
@@ -1691,13 +1719,15 @@ async function performImportDois() {
     $("#doi-progress-fill").style.width = pct + "%";
     $("#doi-progress-text").textContent = msg;
   };
-  setDoiProgress(0, `查询 0/${dois.length}`);
 
-  const existingDois = new Set(papers.map((p) => p.doi).filter(Boolean));
-  let added = 0, notFound = 0;
 
-  const duplicates = dois.filter((doi) => existingDois.has(doi));
-  const queue = dois.filter((doi) => !existingDois.has(doi));
+  const existingDois = new Map(papers.filter((p) => p.doi).map((p) => [p.doi.toLowerCase(), { ...p }]));
+  let added = 0, updated = 0, notFound = 0;
+  const duplicates = dois.filter((doi) => existingDois.get(doi.toLowerCase())?.pdfLink);
+  const queue = dois.filter((doi) => !existingDois.get(doi.toLowerCase())?.pdfLink);
+  const total = queue.length;
+  let skipped = duplicates.length;
+  setDoiProgress(0, `查询 0/${total}，跳过 ${skipped}`);
 
   if (queue.length === 0) {
     $("#doi-count").textContent = duplicates.length > 0
@@ -1715,13 +1745,14 @@ async function performImportDois() {
   async function processOne(doi) {
     const result = await fetchPdfByDoi(doi);
     if (doiImportCancelled || !taskCurrent(generation, epoch)) return;
+    const existing = existingDois.get(doi.toLowerCase());
     const paper = {
       id: Math.abs(`doi:${doi}`.split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0)),
       doi, doiImport: true,
       title: result?.title || doi,
       detailUrl: `https://doi.org/${doi}`,
       pdfLink: result?.pdfLink || "",
-      pdfFailed: result !== null && !result?.pdfLink,
+      pdfFailed: !result?.pdfLink,
       pdfSource: result?.pdfSource || "",
       source: result?.source || "",
       date: result?.date || "",
@@ -1734,12 +1765,21 @@ async function performImportDois() {
       doiFailedList.push(doi);
       notFound++;
     }
-    const saved = await mutatePapers("add", { items: [paper] }, epoch);
+    let saved;
+    if (existing) {
+      const changes = { doiImport: true, pdfLink: paper.pdfLink, pdfFailed: paper.pdfFailed, pdfSource: paper.pdfSource };
+      // 查询失败不能清空已有作者、标题或其他已收集的元数据。
+      for (const key of ["title", "author", "source", "date"]) if (result?.[key]) changes[key] = result[key];
+      saved = await patchPaper(existing, changes, epoch);
+      updated += saved?.updated || 0;
+    } else {
+      saved = await mutatePapers("add", { items: [paper] }, epoch);
+      added += saved?.added || 0;
+      if (saved && !saved.added) skipped++;
+    }
     if (!saved || !taskCurrent(generation, epoch)) return;
-    existingDois.add(doi);
-    added++;
     done++;
-    setDoiProgress(Math.round((done / dois.length) * 100), `查询 ${done}/${dois.length}`);
+    setDoiProgress(Math.round((done / total) * 100), `查询 ${done}/${total}，跳过 ${skipped}`);
     renderList();
     restoreChecks();
     updateFooter();
@@ -1757,8 +1797,8 @@ async function performImportDois() {
   if (!taskCurrent(generation, epoch)) return;
   $("#doi-progress").hidden = true;
   $("#doi-count").textContent = doiImportCancelled
-    ? `已停止，已导入 ${added} 篇`
-    : `已导入 ${added} 篇，${notFound} 篇未找到链接`;
+    ? `已停止，新增 ${added} 篇，更新 ${updated} 篇`
+    : `新增 ${added} 篇，更新 ${updated} 篇，跳过 ${skipped} 篇，${notFound} 篇未找到链接`;
   btn.hidden = false;
   stopBtn.hidden = true;
   copyFailedBtn.hidden = doiFailedList.length === 0;
@@ -1843,15 +1883,13 @@ function bindEvents() {
   // Clear
   $("#btn-clear").addEventListener("click", async () => {
     cancelTasks();
-    try {
-      const cleared = await mutatePapers("clear");
-      papers = cleared.papers;
-      paperEpoch = cleared.epoch;
-    } catch (err) { $("#footer-status").textContent = `清空失败：${err.message}`; return; }
     Object.keys(downloadState).forEach((k) => delete downloadState[k]);
     pendingResumeIds = [];
     consecutiveFails = 0;
     Object.keys(citationCache).forEach((k) => delete citationCache[k]);
+    try {
+      await mutatePapers("clear");
+    } catch (err) { $("#footer-status").textContent = `清空失败：${err.message}`; return; }
     renderList();
     updateResumeButton();
     updateFooter();
@@ -1963,14 +2001,12 @@ function bindEvents() {
     if (changes[ProxyDomains.storageKey]) {
       renderProxyDomains().catch((err) => { $("#proxy-status").textContent = `读取域名失败：${err.message}`; });
     }
-    if (changes.cnkiPapersEpoch && changes.cnkiPapersEpoch.newValue !== paperEpoch) {
-      paperEpoch = changes.cnkiPapersEpoch.newValue || 0;
-      cancelTasks();
-      Object.keys(downloadState).forEach((id) => delete downloadState[id]);
-      updateResumeButton();
-    }
-    if (!changes.cnkiPapers) return;
-    papers = changes.cnkiPapers.newValue || [];
+    if (!changes.cnkiPapers && !changes.cnkiPapersEpoch) return;
+    if (!acceptPaperSnapshot({
+      papers: changes.cnkiPapers?.newValue || papers,
+      epoch: changes.cnkiPapersEpoch?.newValue ?? paperEpoch,
+      revision: changes.cnkiPapersRevision?.newValue ?? paperRevision,
+    })) return;
     renderList();
     restoreChecks();
     updateFooter();
@@ -1988,13 +2024,13 @@ function setupTipQrFallback() {
 }
 
 // ── Update Notes ──
-const CURRENT_VERSION = "1.2.3";
-const UPDATE_NOTE = 'v1.2.3 更新：支持自行添加图书馆 / 代理域名，修复非教育网代理页识别问题';
+const CURRENT_VERSION = chrome.runtime.getManifest().version;
+const UPDATE_NOTE = `v${CURRENT_VERSION} 更新：支持自定义代理域名，修复下载状态、清单同步、勾选导出和 DOI 重试`;
 
 async function checkUpdate() {
   const data = await chrome.storage.local.get(["lastSeenVersion"]);
   if (data.lastSeenVersion === CURRENT_VERSION) return;
-  $("#update-text").innerHTML = UPDATE_NOTE;
+  $("#update-text").textContent = UPDATE_NOTE;
   $("#update-banner").hidden = false;
   $("#update-close").addEventListener("click", async () => {
     $("#update-banner").hidden = true;
@@ -2005,6 +2041,7 @@ async function checkUpdate() {
 // ── Init ──
 async function init() {
   await loadSettings();
+  $(".footer-ver").textContent = `v${CURRENT_VERSION}`;
   $("#toggle-webvpn").checked = settings.useWebVPN;
   $("#toggle-levels").checked = settings.fetchLevels;
   $("#toggle-auto-open-verify").checked = settings.autoOpenOnVerify;

@@ -29,6 +29,35 @@ async function handleFetchText({ url, referrer, timeoutMs, headers }) {
   }
 }
 
+// 只读取文件头，避免把 JSON 错误页或普通文本当成 PDF，也不预下载整份文件。
+async function handleFetchPdfInfo({ url, timeoutMs = 10000, headers }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let reader;
+  try {
+    const res = await fetch(url, { credentials: "include", redirect: "follow", signal: controller.signal, headers: { ...headers, Range: "bytes=0-1023" } });
+    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok || !res.body) return { ok: res.ok, status: res.status, isPdf: false, contentType };
+    reader = res.body.getReader();
+    const prefix = new Uint8Array(1024);
+    let length = 0;
+    while (length < prefix.length) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = value.subarray(0, prefix.length - length);
+      prefix.set(bytes, length);
+      length += bytes.length;
+      if (length >= 16) break;
+    }
+    const header = new TextDecoder().decode(prefix.subarray(0, length));
+    const isPdf = /^\s*%PDF-\d\.\d/.test(header) && !/(?:html|json|xml)/i.test(contentType);
+    return { ok: true, status: res.status, isPdf, contentType, finalUrl: res.url };
+  } finally {
+    if (reader) await reader.cancel().catch((err) => console.debug("PDF 文件头读取已结束", err.message));
+    clearTimeout(timer);
+  }
+}
+
 async function handleFetchPost({ url, body, referrer, headers }) {
   const res = await fetch(url, {
     method: "POST",
@@ -86,6 +115,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       if (msg.type === "PAPER_STORE") return await PaperStore.update(msg);
       if (msg.type === "FETCH_TEXT") return await handleFetchText(msg);
+      if (msg.type === "FETCH_PDF_INFO") return await handleFetchPdfInfo(msg);
       if (msg.type === "FETCH_POST") return await handleFetchPost(msg);
       if (msg.type === "SAVE_DOWNLOAD") return await handleSaveDownload(msg);
       if (msg.type === "MARK_DOWNLOAD") {

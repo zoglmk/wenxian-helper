@@ -608,7 +608,7 @@ body {
 .status-success { color: var(--c-success); }
 .status-error { color: var(--c-error); }
 
-.retry-btn {
+.retry-btn, .fetch-retry-btn {
   margin-left: 6px;
   padding: 2px 8px;
   border: 1px solid var(--c-border);
@@ -621,7 +621,7 @@ body {
   transition: all var(--tr);
   font-family: inherit;
 }
-.retry-btn:hover { background: var(--c-surface); border-color: var(--c-text-3); }
+.retry-btn:hover, .fetch-retry-btn:hover { background: var(--c-surface); border-color: var(--c-text-3); }
 
 .failed-tag {
   font-size: 11px;

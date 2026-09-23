@@ -49,7 +49,7 @@ function harness() {
       query: async () => [],
       sendMessage: async () => { throw new Error('No receiver'); },
     },
-    runtime: { sendMessage: async (msg) => { calls.push(['message', msg]); return { ok: true, downloadId: 3 }; } },
+    runtime: { getManifest: () => ({version:"1.2.3"}), sendMessage: async (msg) => { calls.push(['message', msg]); return { ok: true, downloadId: 3 }; } },
     webNavigation: { onCommitted: {
       addListener: (fn) => calls.push(['nav-add', fn]),
       removeListener: (fn) => calls.push(['nav-remove', fn]),
