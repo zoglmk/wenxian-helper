@@ -1,5 +1,5 @@
 /* Service Worker - handles networking, downloads, and side panel setup */
-importScripts("proxy-domains.js", "download-tracking.js");
+importScripts("proxy-domains.js", "download-tracking.js", "paper-store.js");
 
 // 动态脚本跨重启保留；启动和外部撤销权限时核对注册状态。
 function syncProxyDomains() {
@@ -84,6 +84,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   const handle = async () => {
     try {
+      if (msg.type === "PAPER_STORE") return await PaperStore.update(msg);
       if (msg.type === "FETCH_TEXT") return await handleFetchText(msg);
       if (msg.type === "FETCH_POST") return await handleFetchPost(msg);
       if (msg.type === "SAVE_DOWNLOAD") return await handleSaveDownload(msg);

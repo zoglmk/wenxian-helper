@@ -2,6 +2,33 @@
 
 // ── State ──
 let papers = [];
+let paperEpoch = 0;
+let taskGeneration = 0;
+let activeDownloadWait = null;
+let fetchingLinks = false;
+let loadingLevels = false;
+let importingDois = false;
+function taskCurrent(generation, epoch = paperEpoch) {
+  return generation === taskGeneration && epoch === paperEpoch;
+}
+function cancelTasks() {
+  taskGeneration++;
+  doiImportCancelled = true;
+  activeDownloadWait?.cancel?.();
+  pendingResumeIds = [];
+  hideProgress();
+}
+async function mutatePapers(action, extra = {}, epoch = paperEpoch) {
+  const result = await sendToBackground({ type: "PAPER_STORE", action, epoch, ...extra });
+  if (!result?.ok) {
+    if (result?.code === "stale") return false;
+    throw new Error(result?.error || "保存清单失败");
+  }
+  return result;
+}
+function patchPaper(paper, changes, epoch) {
+  return mutatePapers("patch", { items: [{ id: paper.id, instance: paper._instance, changes }] }, epoch);
+}
 let settings = { useWebVPN: false, fetchLevels: true, autoOpenOnVerify: true, downloadFolder: "" };
 let sortField = "";
 let sortDir = "desc";
@@ -107,17 +134,14 @@ async function addProxyDomain() {
 
 // ── Storage ──
 async function loadSettings() {
-  const data = await chrome.storage.local.get(["useWebVPN", "fetchLevels", "autoOpenOnVerify", "downloadFolder", "cnkiPapers", "cnkiSort"]);
+  const data = await chrome.storage.local.get(["useWebVPN", "fetchLevels", "autoOpenOnVerify", "downloadFolder", "cnkiPapers", "cnkiPapersEpoch", "cnkiSort"]);
   settings.useWebVPN = data.useWebVPN ?? false;
   settings.fetchLevels = data.fetchLevels ?? true;
   settings.autoOpenOnVerify = data.autoOpenOnVerify ?? true;
   settings.downloadFolder = data.downloadFolder ?? "";
   papers = Array.isArray(data.cnkiPapers) ? data.cnkiPapers : [];
+  paperEpoch = data.cnkiPapersEpoch || 0;
   if (data.cnkiSort) { sortField = data.cnkiSort.field || ""; sortDir = data.cnkiSort.dir || "desc"; }
-}
-
-async function savePapers() {
-  await chrome.storage.local.set({ cnkiPapers: papers });
 }
 
 async function saveSort() {
@@ -663,10 +687,18 @@ async function downloadAsFile(filename, content, mimeType = "text/plain") {
 }
 
 // ── Fetch PDF Links (enriches papers with pdfLink, author, keywords) ──
-async function fetchPdfLinks() {
-  const pending = papers.filter((p) => !p.pdfLink && !p.pdfFailed);
+async function fetchPdfLinks(ids = null) {
+  if (fetchingLinks) { $("#footer-status").textContent = "正在获取链接，请稍候"; return; }
+  fetchingLinks = true;
+  try { await performFetchPdfLinks(Array.isArray(ids) ? ids : null); }
+  catch (err) { addLog("error", "保存链接失败", err.message); }
+  finally { fetchingLinks = false; }
+}
+async function performFetchPdfLinks(ids) {
+  const generation = taskGeneration, epoch = paperEpoch;
+  const pending = papers.filter((p) => !p.pdfLink && !p.doiImport && (!ids || ids.includes(p.id))).map((p) => ({ ...p }));
   if (pending.length === 0) {
-    $("#footer-status").textContent = "所有论文已有下载链接";
+    $("#footer-status").textContent = papers.length ? "没有待解析的知网文献；DOI 文献请到 DOI 导入页重试" : "请先添加文献";
     return;
   }
 
@@ -674,8 +706,11 @@ async function fetchPdfLinks() {
   setProgress(0, `获取链接 0/${pending.length}`);
 
   async function fetchOne(paper) {
+    const before = { ...paper };
     try {
-      const res = await sendToBackground({ type: "FETCH_TEXT", url: paper.detailUrl });
+      const res = await sendToBackground({ type: "FETCH_TEXT", url: paper.detailUrl, timeoutMs: 20000 });
+      if (!taskCurrent(generation, epoch)) return;
+      if (!res?.ok) throw new Error(res?.error || `请求失败 (${res?.status || "未知状态"})`);
       if (res?.text) {
         const doc = new DOMParser().parseFromString(res.text, "text/html");
 
@@ -724,7 +759,7 @@ async function fetchPdfLinks() {
           } catch {}
         }
 
-        if (pdfLink) paper.pdfLink = pdfLink;
+        if (pdfLink) { paper.pdfLink = pdfLink; paper.pdfFailed = false; }
 
         // Author extraction. Prefer per-anchor iteration: detail pages render
         // each author as a separate <a> inside the .author wrapper; using the
@@ -809,6 +844,10 @@ async function fetchPdfLinks() {
       paper.pdfFailed = true;
       addLog("error", `获取链接失败: ${paper.title}`, `${err.message}\n详情页: ${paper.detailUrl}`);
     }
+    if (!taskCurrent(generation, epoch)) return;
+    const changes = Object.fromEntries(Object.entries(paper).filter(([key, value]) => before[key] !== value));
+    await patchPaper(paper, changes, epoch);
+    if (!taskCurrent(generation, epoch)) return;
     done++;
     setProgress(Math.round((done / pending.length) * 100), `获取链接 ${done}/${pending.length}`);
   }
@@ -817,16 +856,18 @@ async function fetchPdfLinks() {
   const CONCURRENCY = 3;
   const queue = [...pending];
   const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-    while (queue.length > 0) {
+    while (queue.length > 0 && taskCurrent(generation, epoch)) {
       const paper = queue.shift();
       await fetchOne(paper);
       await new Promise((r) => setTimeout(r, 300));
     }
   });
-  await Promise.all(workers);
+  const outcomes = await Promise.allSettled(workers);
+  const rejected = outcomes.find((r) => r.status === "rejected");
+  if (rejected) throw rejected.reason;
 
+  if (!taskCurrent(generation, epoch)) return;
   hideProgress();
-  await savePapers();
   renderList();
   restoreChecks();
   updateFooter();
@@ -849,29 +890,34 @@ let downloadQueueBusy = false;
 async function downloadPaper(id) {
   if (downloadBusy) return "busy";
   downloadBusy = true;
-  try { return await performDownload(id); }
+  try { return await performDownload(id, taskGeneration); }
   finally { downloadBusy = false; }
 }
 
-async function performDownload(id) {
+async function performDownload(id, generation) {
+  const setState = (...args) => { if (taskCurrent(generation)) setDownloadState(...args); };
   const paper = papers.find((p) => p.id === id);
   if (!paper?.pdfLink) return "fail";
 
-  setDownloadState(id, "downloading");
+  setState(id, "downloading");
 
   // DOI 来源（Unpaywall / Sci-Hub 直链）：直接用 chrome.downloads 下载，不需要知网页面
   if (paper.pdfSource) {
     try {
       const filename = createSafeFilename(paper.title || paper.doi || "paper");
       const res = await sendToBackground({ type: "SAVE_DOWNLOAD", url: paper.pdfLink, filename, useFolder: true });
+      if (!taskCurrent(generation)) return "cancelled";
       if (res?.ok && res.downloadId != null) {
-        const result = await waitForDownloadById(res.downloadId);
+        activeDownloadWait = waitForDownloadById(res.downloadId);
+        const result = await activeDownloadWait;
+        activeDownloadWait = null;
+        if (!taskCurrent(generation)) return "cancelled";
         if (result === "success") {
-          setDownloadState(id, "success");
+          setState(id, "success");
           consecutiveFails = 0;
           return "success";
         } else {
-          setDownloadState(id, "error", result);
+          setState(id, "error", result);
           addLog("error", `下载失败: ${paper.title}`, `原因: ${result}\nURL: ${paper.pdfLink}`);
           // DOI 下载失败属于正常情况（Sci-Hub 可能不可用），不计入连续失败次数
         }
@@ -879,7 +925,7 @@ async function performDownload(id) {
         throw new Error(res?.error || "下载失败");
       }
     } catch (err) {
-      setDownloadState(id, "error", err.message);
+      setState(id, "error", err.message);
       addLog("error", `下载失败: ${paper.title}`, `${err.message}\nURL: ${paper.pdfLink}`);
       // DOI 下载失败不计入连续失败次数
     }
@@ -898,11 +944,13 @@ async function performDownload(id) {
     // Trigger iframe in a CNKI/WebVPN tab so cookies and Referer are correct.
     // Also recognizes the active library proxy page by its CNKI content.
     const tab = await getCnkiTab();
+    if (!taskCurrent(generation)) return "cancelled";
     if (!tab?.id) throw new Error("请打开知网页面后再下载");
 
     const marked = await sendToBackground({ type: "MARK_DOWNLOAD", url: paper.pdfLink });
     if (!marked?.ok) throw new Error(marked?.error || "无法登记下载任务");
     downloadToken = marked.token;
+    if (!taskCurrent(generation)) return "cancelled";
 
     navListener = (details) => {
       if (details.tabId !== tab.id || details.frameId === 0) return;
@@ -913,6 +961,7 @@ async function performDownload(id) {
     // Pre-subscribe before iframe load to avoid race.
     // 启动最多等待 15 秒，完成最多等待 120 秒；超时不会当作完成。
     downloadResultPromise = waitForDownload(paper.pdfLink, 15000, 120000);
+    activeDownloadWait = downloadResultPromise;
 
     // Trigger download via hidden iframe in page's MAIN world.
     // Inject promise resolves once the frame fires onload (so we can sniff
@@ -944,6 +993,7 @@ async function performDownload(id) {
       }),
       args: [paper.pdfLink],
     });
+    if (!taskCurrent(generation)) return "cancelled";
     const result = inject?.[0]?.result || { kind: "no_onload" };
 
     if (result.kind === "navigated") {
@@ -970,18 +1020,18 @@ async function performDownload(id) {
 
       if (category === "verify") {
         lastBlockOpenUrl = finalUrl || paper.detailUrl;
-        setDownloadState(id, "error", "触发知网验证码，已暂停");
+        setState(id, "error", "触发知网验证码，已暂停");
         addLog("error", `触发验证码: ${paper.title}`, `URL: ${paper.pdfLink}\n验证页: ${finalUrl}\n请在浏览器中完成验证后点「继续下载」`);
         return "verify";
       }
       if (category === "quota") {
         lastBlockOpenUrl = paper.detailUrl;
-        setDownloadState(id, "error", "下载额度已用完");
+        setState(id, "error", "下载额度已用完");
         addLog("error", `下载额度已用完: ${paper.title}`, `URL: ${paper.pdfLink}\n知网当日漫游下载量已达上限，可换账号或明日再试`);
         return "quota";
       }
       if (category === "auth") {
-        setDownloadState(id, "error", "需要登录或权限不足");
+        setState(id, "error", "需要登录或权限不足");
         addLog("error", `权限不足: ${paper.title}`, `URL: ${paper.pdfLink}\n请检查登录状态或文献访问权限`);
         consecutiveFails++;
         return "fail";
@@ -990,7 +1040,7 @@ async function performDownload(id) {
       // detail page (raw download URL bounces to ErrorMsg.html without a
       // valid Referer, so we send the user somewhere they can act on).
       lastBlockOpenUrl = paper.detailUrl;
-      setDownloadState(id, "error", "下载页异常，已暂停");
+      setState(id, "error", "下载页异常，已暂停");
       const detail = [
         `URL: ${paper.pdfLink}`,
         finalUrl ? `跳转到: ${finalUrl}` : "无法读取最终 URL",
@@ -1003,28 +1053,30 @@ async function performDownload(id) {
 
     // kind === "no_onload" → frame didn't navigate, real download likely
     const downloadResult = await downloadResultPromise;
+    if (!taskCurrent(generation)) return "cancelled";
     if (downloadResult === "success") {
-      setDownloadState(id, "success");
+      setState(id, "success");
       consecutiveFails = 0;
       return "success";
     }
     if (downloadResult === "timeout") {
-      setDownloadState(id, "error", "下载超时未启动");
+      setState(id, "error", "下载超时未启动");
       addLog("error", `下载超时: ${paper.title}`, `URL: ${paper.pdfLink}\n15 秒内未触发下载，可能是网络较慢或需要登录验证，可重试`);
       consecutiveFails++;
       return "fail";
     }
-    setDownloadState(id, "error", downloadResult);
+    setState(id, "error", downloadResult);
     addLog("error", `下载失败: ${paper.title}`, `原因: ${downloadResult}\nURL: ${paper.pdfLink}`);
     consecutiveFails++;
     return "fail";
   } catch (err) {
-    setDownloadState(id, "error", err.message || "网络错误");
+    setState(id, "error", err.message || "网络错误");
     addLog("error", `下载失败: ${paper.title}`, `${err.message}\nURL: ${paper.pdfLink}`);
     consecutiveFails++;
     return "fail";
   } finally {
     downloadResultPromise?.cancel?.();
+    activeDownloadWait = null;
     if (downloadToken) {
       try { await sendToBackground({ type: "UNMARK_DOWNLOAD", token: downloadToken }); }
       catch (err) { addLog("error", "下载标记清理失败", err.message); }
@@ -1054,10 +1106,11 @@ async function runDownloadQueue(ids) {
 }
 
 async function processDownloadQueue(ids) {
+  const generation = taskGeneration;
   consecutiveFails = 0;
   pendingResumeIds = [];
   updateResumeButton();
-  for (let i = 0; i < ids.length; i++) {
+  for (let i = 0; i < ids.length && taskCurrent(generation); i++) {
     const id = ids[i];
     if (consecutiveFails >= 2) {
       addLog("error", "已连续失败2次，已暂停批量下载", "请检查网络或手动尝试普通下载");
@@ -1069,6 +1122,7 @@ async function processDownloadQueue(ids) {
     const paper = papers.find((p) => p.id === id);
     if (!paper?.pdfLink) continue;
     const r = await downloadPaper(id);
+    if (!taskCurrent(generation)) break;
     if (r === "verify" || r === "quota" || r === "blocked") {
       pendingResumeIds = ids.slice(i);
       if (r === "verify") {
@@ -1093,16 +1147,20 @@ async function processDownloadQueue(ids) {
 
 async function downloadSelected() {
   const selected = getSelectedIds();
-  if (selected.length === 0) return;
-  await runDownloadQueue(selected);
+  const ready = papers.filter((p) => selected.includes(p.id) && p.pdfLink).map((p) => p.id);
+  const skipped = selected.length - ready.length;
+  if (skipped) addLog("info", `跳过 ${skipped} 篇无下载链接的文献`, "这些文献仍可勾选导出");
+  if (!ready.length) { $("#footer-status").textContent = "所选文献暂无下载链接，可先获取链接或直接导出"; return; }
+  await runDownloadQueue(ready);
 }
 
 async function retryFailed() {
-  const failedIds = papers
-    .filter((p) => p.pdfLink && downloadState[p.id]?.status === "error")
-    .map((p) => p.id);
-  if (failedIds.length === 0) return;
-  await runDownloadQueue(failedIds);
+  const failed = papers.filter((p) => p.pdfFailed || downloadState[p.id]?.status === "error");
+  const parseIds = failed.filter((p) => !p.pdfLink && !p.doiImport).map((p) => p.id);
+  if (parseIds.length) await fetchPdfLinks(parseIds);
+  const failedIds = papers.filter((p) => p.pdfLink && failed.some((f) => f.id === p.id)).map((p) => p.id);
+  if (failedIds.length) await runDownloadQueue(failedIds);
+  else if (failed.some((p) => p.doiImport)) $("#footer-status").textContent = "请在 DOI 导入页再次提交失败 DOI 以重试";
 }
 
 async function resumeDownload() {
@@ -1123,6 +1181,7 @@ function updateResumeButton() {
 }
 
 function setDownloadState(id, status, error = "") {
+  if (!papers.some((p) => p.id === id)) return;
   downloadState[id] = { status, error };
   updateCardState(id);
   updateFooter();
@@ -1150,13 +1209,19 @@ async function fetchLevel(url) {
 }
 
 async function loadAllLevels() {
-  if (!settings.fetchLevels) return;
-  for (const paper of papers) {
-    if (!paper.sourceUrl || paper.level !== "Wait") continue;
-    paper.level = await fetchLevel(paper.sourceUrl);
-    updateCardLevel(paper.id, paper.level);
-  }
-  await savePapers();
+  if (!settings.fetchLevels || loadingLevels) return;
+  loadingLevels = true;
+  const generation = taskGeneration, epoch = paperEpoch;
+  try {
+    for (const paper of [...papers]) {
+      if (!taskCurrent(generation, epoch) || !settings.fetchLevels) break;
+      if (!paper.sourceUrl || paper.level !== "Wait") continue;
+      const level = await fetchLevel(paper.sourceUrl);
+      if (!taskCurrent(generation, epoch)) break;
+      await patchPaper(paper, { level }, epoch);
+    }
+  } catch (err) { addLog("error", "保存期刊等级失败", err.message); }
+  finally { loadingLevels = false; }
 }
 
 // ── Rendering ──
@@ -1224,7 +1289,7 @@ function createPaperCard(paper) {
 
   card.innerHTML = `
     <label class="check">
-      <input type="checkbox" class="paper-check" data-id="${paper.id}" ${hasPdf ? "" : "disabled"}>
+      <input type="checkbox" class="paper-check" data-id="${paper.id}" ${paper.selected === false ? "" : "checked"}>
       <span class="check-box"></span>
     </label>
     <div class="paper-body">
@@ -1269,7 +1334,7 @@ function renderAction(id, pdfLink) {
   if (!state) {
     if (pdfLink) return `<button class="dl-btn" data-id="${id}">PDF</button>`;
     const paper = papers.find((p) => p.id === id);
-    if (paper?.pdfFailed) return `<span class="failed-tag">未找到链接</span>`;
+    if (paper?.pdfFailed) return `<span class="failed-tag">未找到链接</span>${paper.doiImport ? "" : `<button class="fetch-retry-btn" data-id="${id}">重试解析</button>`}`;
     return `<span class="pending-tag">待获取链接</span>`;
   }
   if (state.status === "downloading") return `<span class="status status-downloading"><span class="spinner"></span>下载中</span>`;
@@ -1301,17 +1366,20 @@ function updateSortPills() {
 }
 
 function getSelectedIds() {
-  return Array.from($$(".paper-check:checked")).map((cb) => parseInt(cb.dataset.id));
+  return papers.filter((p) => p.selected !== false).map((p) => p.id);
 }
 
 function restoreChecks() {
-  $$(".paper-check").forEach((cb) => { if (!cb.disabled) cb.checked = true; });
+  $$(".paper-check").forEach((cb) => { cb.checked = papers.find((p) => p.id === Number(cb.dataset.id))?.selected !== false; });
 }
 
 function updateFooter() {
   const total = papers.length;
   const ready = papers.filter((p) => p.pdfLink).length;
-  const selected = $$(".paper-check:checked").length;
+  const selected = getSelectedIds().length;
+  const selectAll = $("#select-all");
+  selectAll.checked = total > 0 && selected === total;
+  selectAll.indeterminate = selected > 0 && selected < total;
   const done = Object.values(downloadState).filter((s) => s.status === "success").length;
   const failed = Object.values(downloadState).filter((s) => s.status === "error").length;
   const parts = [`${total} 篇`];
@@ -1323,7 +1391,7 @@ function updateFooter() {
   $("#dl-count").textContent = selected > 0 ? `(${selected})` : "";
   $("#list-count").textContent = `${total} 篇`;
   const retryBtn = $("#btn-retry-failed");
-  if (retryBtn) retryBtn.hidden = failed === 0;
+  if (retryBtn) retryBtn.hidden = failed === 0 && !papers.some((p) => p.pdfFailed);
 }
 
 function setProgress(pct, text) {
@@ -1451,13 +1519,12 @@ function ensureExportMenu() {
 function showExportMenu(btn) {
   const menu = ensureExportMenu();
   // Update hint text based on current selection
-  const selectedCount = $$(".paper-check:checked").length;
-  const totalCount = papers.length;
+  const selectedCount = getSelectedIds().length;
   const hint = menu.querySelector("#export-menu-hint");
   if (hint) {
     hint.textContent = selectedCount > 0
       ? `将导出已勾选的 ${selectedCount} 篇`
-      : `将导出全部 ${totalCount} 篇`;
+      : "请先勾选要导出的文献";
   }
   menu.hidden = false;
   const rect = btn.getBoundingClientRect();
@@ -1471,13 +1538,11 @@ function hideExportMenu() {
 }
 
 async function doExport(format) {
-  // Use selected papers if any, otherwise all
+  // 导出只使用明确勾选的文献，包括没有 PDF 的条目。
   const selectedIds = getSelectedIds();
-  const targets = selectedIds.length > 0
-    ? papers.filter((p) => selectedIds.includes(p.id))
-    : papers;
+  const targets = papers.filter((p) => selectedIds.includes(p.id));
   if (targets.length === 0) {
-    $("#footer-status").textContent = "没有可导出的文献";
+    $("#footer-status").textContent = "请先勾选要导出的文献";
     return;
   }
 
@@ -1594,6 +1659,19 @@ let doiImportCancelled = false;
 let doiFailedList = [];
 
 async function importDois() {
+  if (importingDois) return;
+  importingDois = true;
+  try { await performImportDois(); }
+  catch (err) { addLog("error", "导入保存失败", err.message); $("#doi-count").textContent = `导入失败：${err.message}`; }
+  finally {
+    importingDois = false;
+    $("#btn-doi-import").hidden = false;
+    $("#btn-doi-stop").hidden = true;
+    $("#doi-progress").hidden = true;
+  }
+}
+async function performImportDois() {
+  const generation = taskGeneration, epoch = paperEpoch;
   const text = $("#doi-input").value.trim();
   const dois = parseDois(text);
   if (dois.length === 0) { $("#doi-count").textContent = "未识别到有效 DOI"; return; }
@@ -1636,9 +1714,10 @@ async function importDois() {
 
   async function processOne(doi) {
     const result = await fetchPdfByDoi(doi);
+    if (doiImportCancelled || !taskCurrent(generation, epoch)) return;
     const paper = {
       id: Math.abs(`doi:${doi}`.split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0)),
-      doi,
+      doi, doiImport: true,
       title: result?.title || doi,
       detailUrl: `https://doi.org/${doi}`,
       pdfLink: result?.pdfLink || "",
@@ -1655,7 +1734,8 @@ async function importDois() {
       doiFailedList.push(doi);
       notFound++;
     }
-    papers.push(paper);
+    const saved = await mutatePapers("add", { items: [paper] }, epoch);
+    if (!saved || !taskCurrent(generation, epoch)) return;
     existingDois.add(doi);
     added++;
     done++;
@@ -1666,13 +1746,15 @@ async function importDois() {
   }
 
   const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-    while (queue.length > 0 && !doiImportCancelled) {
+    while (queue.length > 0 && !doiImportCancelled && taskCurrent(generation, epoch)) {
       await processOne(queue.shift());
     }
   });
-  await Promise.all(workers);
+  const outcomes = await Promise.allSettled(workers);
+  const rejected = outcomes.find((r) => r.status === "rejected");
+  if (rejected) throw rejected.reason;
 
-  await savePapers();
+  if (!taskCurrent(generation, epoch)) return;
   $("#doi-progress").hidden = true;
   $("#doi-count").textContent = doiImportCancelled
     ? `已停止，已导入 ${added} 篇`
@@ -1760,12 +1842,16 @@ function bindEvents() {
 
   // Clear
   $("#btn-clear").addEventListener("click", async () => {
-    papers = [];
+    cancelTasks();
+    try {
+      const cleared = await mutatePapers("clear");
+      papers = cleared.papers;
+      paperEpoch = cleared.epoch;
+    } catch (err) { $("#footer-status").textContent = `清空失败：${err.message}`; return; }
     Object.keys(downloadState).forEach((k) => delete downloadState[k]);
     pendingResumeIds = [];
     consecutiveFails = 0;
     Object.keys(citationCache).forEach((k) => delete citationCache[k]);
-    await savePapers();
     renderList();
     updateResumeButton();
     updateFooter();
@@ -1782,9 +1868,11 @@ function bindEvents() {
   });
 
   // Select all
-  $("#select-all").addEventListener("change", (e) => {
-    $$(".paper-check").forEach((cb) => { if (!cb.disabled) cb.checked = e.target.checked; });
-    updateFooter();
+  $("#select-all").addEventListener("change", async (e) => {
+    const selected = e.target.checked;
+    const items = papers.map((p) => ({ id: p.id, instance: p._instance, changes: { selected } }));
+    try { await mutatePapers("patch", { items }); }
+    catch (err) { addLog("error", "保存选择失败", err.message); restoreChecks(); }
   });
 
   // Sort
@@ -1802,6 +1890,8 @@ function bindEvents() {
 
   // Paper list clicks
   $("#paper-list").addEventListener("click", (e) => {
+    const parse = e.target.closest(".fetch-retry-btn");
+    if (parse) { fetchPdfLinks([Number(parse.dataset.id)]); return; }
     const dl = e.target.closest(".dl-btn");
     if (dl) { runDownloadQueue([parseInt(dl.dataset.id)]); return; }
     const retry = e.target.closest(".retry-btn");
@@ -1834,8 +1924,12 @@ function bindEvents() {
   });
 
   // Checkbox changes
-  $("#paper-list").addEventListener("change", (e) => {
-    if (e.target.classList.contains("paper-check")) updateFooter();
+  $("#paper-list").addEventListener("change", async (e) => {
+    if (!e.target.classList.contains("paper-check")) return;
+    const paper = papers.find((p) => p.id === Number(e.target.dataset.id));
+    if (!paper) return;
+    try { await patchPaper(paper, { selected: e.target.checked }); }
+    catch (err) { addLog("error", "保存选择失败", err.message); restoreChecks(); }
   });
 
   // Toggles
@@ -1868,6 +1962,12 @@ function bindEvents() {
   chrome.storage.onChanged.addListener((changes) => {
     if (changes[ProxyDomains.storageKey]) {
       renderProxyDomains().catch((err) => { $("#proxy-status").textContent = `读取域名失败：${err.message}`; });
+    }
+    if (changes.cnkiPapersEpoch && changes.cnkiPapersEpoch.newValue !== paperEpoch) {
+      paperEpoch = changes.cnkiPapersEpoch.newValue || 0;
+      cancelTasks();
+      Object.keys(downloadState).forEach((id) => delete downloadState[id]);
+      updateResumeButton();
     }
     if (!changes.cnkiPapers) return;
     papers = changes.cnkiPapers.newValue || [];
