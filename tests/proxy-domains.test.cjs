@@ -171,10 +171,13 @@ test('只按主机名识别内置网址，路径与伪装后缀不能冒充知�
 });
 
 for (const url of ['https://kns.cnki.net/kns8s/', 'https://webvpn.school.edu.cn/vpn/abc']) {
-  test(`原有活动页不增加探测，直接选择：${url}`, async () => {
+  test(`内置活动页确认知网内容后仍优先选择：${url}`, async () => {
     const h = panelHarness();
     h.chrome.tabs.query = async () => [{ id: 1, url }];
+    let pings = 0;
+    h.chrome.tabs.sendMessage = async () => { pings++; return { ok: true, isCnki: true }; };
     assert.equal((await h.context.getCnkiTab()).id, 1);
+    assert.ok(pings > 0, 'domain match alone must not select a tab');
     assert.equal(h.calls.length, 0);
   });
 }
@@ -193,9 +196,111 @@ test('没有权限或普通网页不冒充知网，保留原有标签页回退',
     ? [{ id: 2, url: 'https://example.org/' }]
     : [{ id: 1, url: 'https://kns.cnki.net/' }];
   h.chrome.scripting.executeScript = async () => { throw new Error('No host permission'); };
+  h.chrome.tabs.sendMessage = async id => {
+    if (id === 1) return { ok: true, isCnki: true };
+    throw new Error('No receiver');
+  };
   assert.equal((await h.context.getCnkiTab()).id, 1);
   h.chrome.tabs.query = async () => [];
   assert.equal(await h.context.getCnkiTab(), null);
+});
+
+const university = { id: 10, url: 'https://www.school.edu.cn/' };
+const proquest = { id: 11, url: 'https://www.proquest.com/docview/123' };
+const validProxy = { id: 12, url: `https://${domainA}:9443/vpn/abc` };
+function candidateHarness(active, tabs, validIds = [validProxy.id]) {
+  const h = panelHarness();
+  h.data.cnkiProxyDomains = [domainA];
+  h.chrome.tabs.query = async query => query.active ? (active ? [active] : []) : tabs;
+  h.chrome.tabs.sendMessage = async id => ({ ok: true, isCnki: validIds.includes(id) });
+  return h;
+}
+
+for (const active of [university, proquest]) {
+  test(`当前 ${active.id === 10 ? '普通高校页' : 'ProQuest'} 不让高校门户抢先于有效自定义代理页`, async () => {
+    const h = candidateHarness(active, [university, proquest, validProxy]);
+    assert.equal((await h.context.getCnkiTab())?.id, validProxy.id);
+  });
+}
+
+test('当前是真正知网页时，优先于其他有效代理页且必须 PING 确认', async () => {
+  const active = { id: 13, url: 'https://kns.cnki.net/kns8s/' };
+  const h = candidateHarness(active, [validProxy, active], [13, 12]);
+  const ping = h.chrome.tabs.sendMessage, checked = [];
+  h.chrome.tabs.sendMessage = async id => { checked.push(id); return ping(id); };
+  assert.equal((await h.context.getCnkiTab()).id, active.id);
+  assert.ok(checked.length > 0);
+  assert.ok(checked.every(id => id === active.id));
+});
+
+test('只有普通高校网页，没有确认知网内容的候选页时返回 null', async () => {
+  const h = candidateHarness(university, [university], []);
+  assert.equal(await h.context.getCnkiTab(), null);
+});
+
+test('PING 成功但缺少严格的 isCnki=true，不能作为执行页', async () => {
+  for (const status of [{ ok: true }, { isCnki: false }, { isCnki: 'true' }, undefined]) {
+    const h = candidateHarness(university, [university]);
+    h.chrome.tabs.sendMessage = async () => status;
+    assert.equal(await h.context.getCnkiTab(), null);
+  }
+});
+
+test('实际内容脚本 PING 依页面内容确认知网，域名含 cnki 的门户也不能冒充', () => {
+  for (const hostname of ['kns.cnki.net', 'cnki.school.edu.cn', domainA]) {
+    let listener, content = false;
+    const context = vm.createContext({
+      window: {}, location: { hostname }, setTimeout: () => {}, clearTimeout() {},
+      MutationObserver: class { observe() {} },
+      document: { createElement: () => ({}), head: { appendChild() {} }, body: {},
+        querySelector: selector => content && selector.includes('.result-table-list') ? {} : null,
+        querySelectorAll: () => [] },
+      chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } },
+        storage: { onChanged: { addListener() {} }, local: { get: async () => ({}) } } },
+    });
+    vm.runInContext(read('content/main.js'), context);
+    const ping = () => { let response; listener({ type: 'PING' }, {}, value => { response = value; }); return response; };
+    assert.equal(ping().isCnki, false, hostname);
+    content = true;
+    assert.equal(ping().isCnki, true, `${hostname}: late-loaded CNKI results`);
+    assert.equal(context.window.__cnkiHelperActivated, true);
+  }
+});
+
+test('候选页关闭、无注入权限、无响应和无效 URL 不阻断后续有效代理', async () => {
+  const broken = [20, 21, 22].map(id => ({ id, url: `https://host${id}.school.edu.cn/` }));
+  const h = candidateHarness(proquest, [broken[0], { id: 23, url: 'not a URL' }, ...broken.slice(1), validProxy]);
+  // 加速候选探测超时，仍保留 Promise/计时器的真实竞争关系。
+  h.context.setTimeout = fn => setTimeout(fn, 5);
+  const ping = h.chrome.tabs.sendMessage;
+  h.chrome.tabs.sendMessage = async id => {
+    if (id === 20 || id === 21) throw new Error(id === 20 ? 'No tab with id' : 'No receiver');
+    if (id === 22) return new Promise(() => {});
+    return ping(id);
+  };
+  h.chrome.scripting.executeScript = async () => { throw new Error('Cannot access contents of url'); };
+  assert.equal((await h.context.getCnkiTab())?.id, validProxy.id);
+});
+
+test('候选内容脚本未加载时，在允许注入后再次 PING 确认，而不把注入成功当知网', async () => {
+  for (const isCnki of [true, false]) {
+    const h = candidateHarness(proquest, [validProxy]); let loaded = false, pings = 0;
+    const ping = h.chrome.tabs.sendMessage;
+    h.chrome.tabs.sendMessage = async id => {
+      if (id !== validProxy.id) return ping(id);
+      pings++;
+      if (!loaded) throw new Error('No receiver');
+      return { ok: true, isCnki };
+    };
+    h.chrome.scripting.executeScript = async args => {
+      assert.equal(args.target.tabId, validProxy.id);
+      assert.deepEqual(Array.from(args.files), ['content/main.js']);
+      loaded = true;
+    };
+    assert.equal((await h.context.getCnkiTab())?.id ?? null, isCnki ? validProxy.id : null);
+    assert.equal(loaded, true);
+    assert.equal(pings, 2);
+  }
 });
 
 test('可回退到已配置且内容识别成功的代理标签页', async () => {

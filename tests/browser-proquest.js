@@ -69,7 +69,7 @@ async panel => {
   await panel.waitForFunction(() => !downloadQueueBusy && downloadState[900002]?.status === 'success');
   const saved = (await downloads()).filter(d => d.id > before);
   assert(saved.length === 1 && saved[0].url.startsWith('https://media.proquest.com:18543/media/900002?_s=fixture'), 'only checked record uses original media host and port');
-  assert(saved[0].filename.endsWith('/proquest-fixture/Public thesis 900002.pdf'), 'title and folder retained');
+  assert(/\/proquest-fixture\/Public thesis 900002(?: \(\d+\))?\.pdf$/.test(saved[0].filename), 'title and folder retained, including Chrome duplicate suffix');
   results.push({ case: 'selected-native-download', downloads: saved });
 
   // 重试必须重新请求详情，不复用上一次媒体签名。

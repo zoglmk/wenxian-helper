@@ -1,6 +1,47 @@
 # 回归验证
 
-## ProQuest v1.3.0（2026-09-23，待发布）
+## v1.3.0 发布前两项补丁（2026-09-23，本次执行）
+
+基线为 `codex/custom-proxy-domains` / `9ce2cb65f0b8ad275209e7172865cf3f973e659f`，开始时工作区干净。本次只修复 ProQuest 单篇失败重试和知网执行标签页选择，未提交、推送、合并、打 tag 或发布。
+
+### 修改与失败复现
+
+- `sidepanel/index.js`：单篇、批量失败重试及暂停后的继续下载进入同一带锁队列。已确认公开但缺链接的 ProQuest 文献可进入 `downloadProquestPaper()` 重新解析；文件下载仍取决于本次公开状态、有效新链接及 PDF 校验。保留普通队列的 `canDownloadPaper()` 筛选、指定 ID 范围和清空失效机制。知网缺链接的失败重试仍走原有解析。
+- `getCnkiTab()` / `confirmCnkiTab()`：当前页优先，但所有候选必须通过内容脚本明确返回 `isCnki === true`。沿用已有权限尝试注入；每个候选最多探测 2 秒，关闭、失去权限、无响应和无效网址均不阻断后续候选。没有改主机权限、代理编码、端口或 iframe 下载地址。
+- `content/main.js`：删除主机名包含 `cnki` 就返回真的捷径；沿用现有搜索结果、目录和详情页特征确认内容，避免 `cnki.school.edu.cn` 门户误报。
+
+先扩展现有 `proquest.test.cjs`、`proxy-domains.test.cjs` 再修改实现。基线 56/56 通过；第一轮新增/调整用例后 70 项中 16 项失败，复现卡片重试不请求详情、普通高校页抢先等问题。实际内容脚本的域名误报另行先复现失败；补丁检查中补测并修复了暂停后继续重试。最终净新增 **16 项**，另将原先两条“内置域名直接返回”的断言改为必须验证 PING，保留当前有效页优先的断言。
+
+新增覆盖：卡片真实点击绑定 → 队列 → 第二次解析 → 文件 API；preview/unknown 排除；连续点击互斥；清空时迟到结果；再次解析失败仍可重试；单篇 ID 隔离；批量重试及暂停恢复。标签页覆盖当前普通高校页、当前 ProQuest、有效知网页优先、仅普通高校页返回 null、严格 PING、动态加载、关闭/无权限/无响应、注入后再次验证。
+
+### 本次实际结果
+
+| 验证 | 命令 / 脚本 | 通过 / 失败 |
+|---|---|---|
+| Node 自动测试 | `node --test tests/*.test.cjs` | 72 / 0 |
+| 补丁浏览器场景 | `playwright-cli -s=patch run-code --filename tests/browser-release-patch.js` | 9 / 0 |
+| 原有集成场景 | `playwright-cli -s=patch run-code --filename tests/browser-integration.js` | 10 / 0 |
+| ProQuest 浏览器场景 | `playwright-cli -s=patch run-code --filename tests/browser-proquest.js` | 7 / 0 |
+| 三种来源混合队列 | `playwright-cli -s=patch run-code --filename tests/browser-mixed-download.js` | 1 / 0 |
+
+浏览器命令通过 `/Users/zgm/.codex/skills/playwright/scripts/playwright_cli.sh` 执行，接入独立 Chrome for Testing 153.0.8010.53（CDP 19223）。本地服务新增公开但缺 PDF、未知公开状态和详情延迟样例。9 组新增场景实际点击按钮、检查第二次详情 HTTP 请求、Chrome 完成状态和清空后的存储；同开高校门户、ProQuest、代理与知网页验证选择，并由选中的代理页完成原有 iframe 下载。
+
+原有场景覆盖知网直连、教育网代理、自定义域名输入和动态注册、各端口/路径、下载归属及目录、跨页收藏与选择、导出、DOI、预览/HTML 排除。域名授权拒绝、移除、撤销和旧格式文献兼容另由 Node 测试覆盖。实际读回本轮通过场景产生的 **16 份 PDF、1 份 CSV**：PDF 文件头、文件尾和 1 页结构有效，CSV 标题和作者正确。`node --check`（两处业务 JS、两个相关浏览器脚本）、Python fixture 语法解析与 `git diff --check` 通过。
+
+ProQuest 浏览器脚本首次重跑在文件名断言失败：历史同名文件让 Chrome 添加 `(3)` 后缀，下载本身为 complete。仅调整测试以允许 Chrome 标准重名后缀，仍严格校验标题和子目录；随后 7 组全部重跑通过。未改下载文件名实现，也未清理历史文件。
+
+当前结果在忽略提交的 `output/playwright/release-patch-*-results.json`、`release-patch-results.json`、`release-patch-node-tests.txt` 和 `release-patch-files-verified.json`；下方历史结果不计入本次。重跑方法沿用本文的独立配置说明，启用 ProQuest 本地映射后运行四个脚本；新脚本同样会清空测试清单，不能在日常浏览器使用。
+
+### 未执行和最少手工验收
+
+本轮没有执行真实网站测试：浏览器使用本地映射；没有真实知网/湖北图书馆账号，也未测试 ProQuest 订阅或购买流程。原生导出“另存为”对话框未重跑，沿用集成脚本在测试页将导出暂改自动保存并验证原始 `saveAs` 请求的方式。日常浏览器权限、下载设置和系统代理未改。
+
+在上述范围未发现新增回归；真实账号及未知代理页面结构仍待确认。发布前重新加载扩展并刷新网页后，最少做两项：
+
+1. 实际知网及自定义图书馆代理各下载一篇；同时打开普通高校页和 ProQuest，确认仍能通过有效知网页下载，目录正确。
+2. 实际 ProQuest 公开全文跨页收藏后勾选下载；可用断网再恢复制造一次请求失败，分别点单篇和批量重试，确认完成且不重复。仅预览文献应跳过。
+
+## ProQuest v1.3.0（2026-09-23，此前验收记录，待发布）
 
 56 项 Node 自动测试通过；7 组 ProQuest 本地浏览器场景、原有 10 组集成场景，以及知网 / ProQuest / DOI 混合队列均通过。继续使用独立 Chrome for Testing 153.0.8010.53，没有修改日常浏览器配置。
 

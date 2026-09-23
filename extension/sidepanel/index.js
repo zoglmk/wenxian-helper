@@ -502,33 +502,38 @@ function isCnkiLikeUrl(url = "") {
   }
 }
 
+async function confirmCnkiTab(tab) {
+  if (!tab?.id || !/^https?:\/\//i.test(tab.url || "")) return false;
+  let timer;
+  try {
+    // 页面关闭、失去权限或无响应时继续查找，不能只凭域名或注入成功判定。
+    return await Promise.race([
+      (async () => {
+        if (!await ensureContentScript(tab)) return false;
+        const status = await chrome.tabs.sendMessage(tab.id, { type: "PING" });
+        return status?.isCnki === true;
+      })(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), 2000); }),
+    ]);
+  } catch {
+    return false;
+  } finally { clearTimeout(timer); }
+}
+
 async function getCnkiTab() {
   const active = await getActiveTab();
-  if (active?.id && isCnkiLikeUrl(active.url)) return active;
-  // 公共图书馆代理未必使用 cnki.net / edu.cn。只检查当前页，使用用户
-  // 点击扩展图标时授予的 activeTab 权限，不扩大永久网站访问权限。
-  if (active?.id && await ensureContentScript(active)) {
-    try {
-      const status = await chrome.tabs.sendMessage(active.id, { type: "PING" });
-      if (status?.isCnki) return active;
-    } catch {
-      // 标签页已跳转或关闭时，继续查找原有的知网 / 学校代理标签页。
-    }
-  }
-  // 当前激活页不是知网/WebVPN，搜索所有已打开的相关标签页
+  // 当前页可以使用已有 activeTab 授权；其他页只检查内置或用户配置的域名。
+  if (await confirmCnkiTab(active)) return active;
   const tabs = await chrome.tabs.query({});
-  const existing = tabs.find((t) => t.id && isCnkiLikeUrl(t.url));
-  if (existing) return existing;
   const domains = await ProxyDomains.list();
   for (const tab of tabs) {
-    if (!tab.id || !tab.url) continue;
-    if (!domains.some((domain) => ProxyDomains.matchesHost(new URL(tab.url).hostname, domain))) continue;
+    if (!tab.id || tab.id === active?.id || !tab.url) continue;
     try {
-      const status = await chrome.tabs.sendMessage(tab.id, { type: "PING" });
-      if (status?.isCnki) return tab;
-    } catch {
-      // 该代理页尚未加载或已失去权限，继续查找可用页面。
-    }
+      const { protocol, hostname } = new URL(tab.url);
+      if (!/^https?:$/.test(protocol)) continue;
+      if (!isCnkiLikeUrl(tab.url) && !domains.some((domain) => ProxyDomains.matchesHost(hostname, domain))) continue;
+    } catch { continue; }
+    if (await confirmCnkiTab(tab)) return tab;
   }
   return null;
 }
@@ -1208,17 +1213,27 @@ function waitForDownload(expectedUrl, startTimeoutMs = 15000, completeTimeoutMs 
   return DownloadTracking.wait({ url: expectedUrl, startTimeout: startTimeoutMs, completeTimeout: completeTimeoutMs });
 }
 
-async function runDownloadQueue(ids) {
+async function runDownloadQueue(ids, { retry = false } = {}) {
   if (downloadQueueBusy || downloadBusy) {
     $("#footer-status").textContent = "已有下载任务进行中，请等待当前任务结束";
     return;
   }
   downloadQueueBusy = true;
-  try { await processDownloadQueue([...new Set(ids)]); }
+  const generation = taskGeneration;
+  ids = [...new Set(ids)];
+  try {
+    if (retry) {
+      // 知网仍先补解析缺失的链接；ProQuest 在下载前直接重新确认权限和签名。
+      // 锁覆盖解析和下载，避免单篇与批量重试在等待详情时相互插入。
+      const parseIds = papers.filter((p) => ids.includes(p.id) && !canDownloadPaper(p) && !isDoiPaper(p) && !isProquestPaper(p)).map((p) => p.id);
+      if (parseIds.length) await fetchPdfLinks(parseIds);
+    }
+    if (taskCurrent(generation)) await processDownloadQueue(ids, { retry });
+  }
   finally { downloadQueueBusy = false; }
 }
 
-async function processDownloadQueue(ids) {
+async function processDownloadQueue(ids, { retry = false } = {}) {
   const generation = taskGeneration;
   consecutiveFails = 0;
   pendingResumeIds = [];
@@ -1233,7 +1248,15 @@ async function processDownloadQueue(ids) {
     }
     if (downloadState[id]?.status === "success") continue;
     const paper = papers.find((p) => p.id === id);
-    if (!canDownloadPaper(paper)) continue;
+    if (!canDownloadPaper(paper)) {
+      // 已确认过公开状态的 ProQuest 重试进入重新解析；这不是文件下载授权。
+      // downloadProquestPaper 仍使用本次详情的权限和新链接决定是否下载。
+      if (!retry || !isProquestPaper(paper)) continue;
+      if (paper.proquestAccess !== "open") {
+        setDownloadState(id, "skipped", paper.proquestReason || "未确认公开全文，本版跳过");
+        continue;
+      }
+    }
     const r = await downloadPaper(id);
     if (!taskCurrent(generation)) break;
     if (r === "verify" || r === "quota" || r === "blocked") {
@@ -1269,11 +1292,8 @@ async function downloadSelected() {
 
 async function retryFailed() {
   const failed = papers.filter((p) => p.pdfFailed || downloadState[p.id]?.status === "error");
-  const parseIds = failed.filter((p) => !canDownloadPaper(p) && !isDoiPaper(p)).map((p) => p.id);
-  if (parseIds.length) await fetchPdfLinks(parseIds);
-  const failedIds = papers.filter((p) => canDownloadPaper(p) && failed.some((f) => f.id === p.id)).map((p) => p.id);
-  if (failedIds.length) await runDownloadQueue(failedIds);
-  else if (failed.some((p) => isDoiPaper(p))) $("#footer-status").textContent = "请在 DOI 导入页再次提交失败 DOI 以重试";
+  await runDownloadQueue(failed.map((p) => p.id), { retry: true });
+  if (failed.length && failed.every((p) => isDoiPaper(p) && !canDownloadPaper(p))) $("#footer-status").textContent = "请在 DOI 导入页再次提交失败 DOI 以重试";
 }
 
 async function resumeDownload() {
@@ -1281,7 +1301,7 @@ async function resumeDownload() {
   const ids = [...pendingResumeIds];
   pendingResumeIds = [];
   $("#footer-status").textContent = "继续下载中...";
-  await runDownloadQueue(ids);
+  await runDownloadQueue(ids, { retry: true });
 }
 
 function updateResumeButton() {
@@ -2023,7 +2043,7 @@ function bindEvents() {
     const dl = e.target.closest(".dl-btn");
     if (dl) { runDownloadQueue([parseInt(dl.dataset.id)]); return; }
     const retry = e.target.closest(".retry-btn");
-    if (retry) { runDownloadQueue([parseInt(retry.dataset.id)]); return; }
+    if (retry) { runDownloadQueue([parseInt(retry.dataset.id)], { retry: true }); return; }
 
     // Abstract toggle
     const absBtn = e.target.closest(".abstract-toggle-btn");

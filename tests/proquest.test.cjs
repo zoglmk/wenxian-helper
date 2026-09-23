@@ -13,7 +13,8 @@ function harness(initial = [paper()]) {
   const state = { cnkiPapers: clone(initial), cnkiPapersEpoch: 0 };
   const elements = new Map(), calls = [], logs = [], statuses = [];
   const el = selector => {
-    if (!elements.has(selector)) elements.set(selector, { textContent: '', hidden: false, style: {} });
+    if (!elements.has(selector)) elements.set(selector, { textContent: '', hidden: false, style: {}, listeners: {},
+      addEventListener(type, fn) { this.listeners[type] = fn; } });
     return elements.get(selector);
   };
   let context;
@@ -24,20 +25,146 @@ function harness(initial = [paper()]) {
     if (message.type === 'SAVE_DOWNLOAD') return { ok: true, downloadId: 42 };
     throw new Error(message.type);
   } }, downloads: { search: async () => [{ id: 42, state: 'complete', mime: 'application/pdf' }] },
-    storage: { local: { get: async () => clone(state), set: async values => Object.assign(state, clone(values)) } } };
-  context = vm.createContext({ chrome, URL, crypto, console, setTimeout, clearTimeout,
+    storage: { onChanged: { addListener() {} }, local: { get: async () => clone(state), set: async values => Object.assign(state, clone(values)) } } };
+  context = vm.createContext({ chrome, URL, crypto, console, setTimeout: fn => setTimeout(fn, 0), clearTimeout,
     document: { querySelector: el, querySelectorAll: () => [], createElement: () => ({ dataset: {}, innerHTML: '' }) } });
   vm.runInContext(read('proquest.js'), context);
   vm.runInContext(read('paper-store.js') + '\nthis.store = PaperStore;', context);
   vm.runInContext(read('sidepanel/index.js').replace(/\ninit\(\);\s*$/, '\n'), context);
   context.initial = clone(initial);
-  vm.runInContext('papers = initial; renderList = () => {}; restoreChecks = () => {}; updateFooter = () => {};', context);
+  vm.runInContext('papers = initial; renderList = () => {}; restoreChecks = () => {}; updateFooter = () => {}; updateCardState = () => {};', context);
   context.addLog = (...args) => logs.push(args);
-  context.setDownloadState = (...args) => statuses.push(args);
+  const setState = context.setDownloadState;
+  context.setDownloadState = (...args) => { statuses.push(args); setState(...args); };
   context.waitForDownloadById = async id => { assert.equal(id, 42); return 'success'; };
   context.resolveProquestPaper = async p => ({ paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/hms/PFT/fresh?_s=new%2Fsignature' });
   return { context, state, calls, chrome, logs, statuses, el };
 }
+
+// 使用真实事件绑定、队列与状态更新；只替换详情网络和 Chrome 文件 API。
+function retryHarness() {
+  const h = harness([paper(), { ...paper('222'), pdfFailed: true, pdfReady: false }]);
+  h.context.bindEvents();
+  h.click = (selector, id = paper().id) => h.el('#paper-list').listeners.click({
+    target: { closest: match => match === selector ? { dataset: { id: String(id) } } : null },
+  });
+  h.button = selector => h.el(selector).listeners.click();
+  h.idle = async () => {
+    for (let n = 0; n < 100; n++) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+      if (vm.runInContext('!downloadQueueBusy && !downloadBusy && !fetchingLinks', h.context)) return;
+    }
+    assert.fail('retry queue did not become idle');
+  };
+  h.currentStatus = () => vm.runInContext(`downloadState[${paper().id}]?.status`, h.context);
+  h.missing = p => ({ paper: { ...p, pdfReady: false, pdfFailed: true, proquestReason: '公开论文暂未提供有效 PDF 链接' }, pdfUrl: '' });
+  h.failFirst = async () => {
+    h.context.resolveProquestPaper = async p => h.missing(p);
+    h.click('.dl-btn');
+    await h.idle();
+    assert.equal(h.state.cnkiPapers[0].pdfReady, false);
+    assert.equal(h.currentStatus(), 'error');
+    assert.match(h.context.renderAction(paper().id), /retry-btn/);
+  };
+  return h;
+}
+
+test('卡片重试经过事件与队列，公开但缺链接时重新解析并下载，仅处理指定文献', async () => {
+  const h = retryHarness();
+  await h.failFirst();
+  const parsed = [];
+  h.context.resolveProquestPaper = async p => {
+    parsed.push(p.id);
+    return { paper: { ...p, pdfReady: true, pdfFailed: false }, pdfUrl: 'https://media.proquest.com/media/file?_s=retry-fresh' };
+  };
+  h.click('.retry-btn');
+  await h.idle();
+  assert.deepEqual(parsed, [paper().id]);
+  assert.equal(h.currentStatus(), 'success');
+  assert.equal(h.state.cnkiPapers[0].pdfReady, true);
+  assert.equal(h.state.cnkiPapers[1].pdfReady, false);
+  assert.deepEqual(h.calls.filter(c => c.type === 'SAVE_DOWNLOAD').map(c => c.url), ['https://media.proquest.com/media/file?_s=retry-fresh']);
+});
+
+for (const access of ['preview', 'unknown']) {
+  test(`卡片重试重新解析为 ${access} 时显示跳过原因，不探测或下载文件`, async () => {
+    const h = retryHarness(); await h.failFirst(); let parses = 0;
+    h.context.resolveProquestPaper = async p => {
+      parses++;
+      return { paper: { ...p, pdfReady: false, proquestAccess: access, proquestReason: `跳过 ${access}` }, pdfUrl: '' };
+    };
+    h.click('.retry-btn'); await h.idle();
+    assert.equal(parses, 1);
+    assert.equal(h.currentStatus(), 'skipped');
+    assert.match(h.context.renderAction(paper().id), new RegExp(`跳过 ${access}`));
+    assert.ok(!h.calls.some(c => ['FETCH_PDF_INFO', 'SAVE_DOWNLOAD'].includes(c.type)));
+  });
+}
+
+test('连续点击卡片与批量重试共享互斥，不重复解析或下载', async () => {
+  const h = retryHarness(); await h.failFirst(); let finish, parses = 0;
+  h.context.resolveProquestPaper = p => { parses++; return new Promise(resolve => { finish = () => resolve({ paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/file?_s=once' }); }); };
+  h.click('.retry-btn'); h.click('.retry-btn');
+  const batch = h.button('#btn-retry-failed');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(parses, 1);
+  finish(); await batch; await h.idle();
+  assert.equal(parses, 1);
+  assert.equal(h.calls.filter(c => c.type === 'SAVE_DOWNLOAD').length, 1);
+});
+
+test('卡片重试解析中通过清空按钮清单失效，迟到结果不写回或启动下载', async () => {
+  const h = retryHarness(); await h.failFirst(); let finish;
+  h.context.resolveProquestPaper = p => new Promise(resolve => { finish = () => resolve({ paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/file?_s=late' }); });
+  h.click('.retry-btn');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof finish, 'function', 'retry must request detail before clear');
+  await h.button('#btn-clear'); finish(); await h.idle();
+  assert.deepEqual(h.state.cnkiPapers, []);
+  assert.equal(h.currentStatus(), undefined);
+  assert.ok(!h.calls.some(c => c.type === 'SAVE_DOWNLOAD'));
+});
+
+test('重试详情再次失败保留失败和重试入口，之后仍可恢复', async () => {
+  const h = retryHarness(); await h.failFirst(); let parses = 0;
+  h.context.resolveProquestPaper = async () => { parses++; throw new Error('详情请求失败'); };
+  h.click('.retry-btn'); await h.idle();
+  assert.equal(parses, 1);
+  assert.equal(h.currentStatus(), 'error');
+  assert.match(h.context.renderAction(paper().id), /retry-btn/);
+  h.context.resolveProquestPaper = async p => ({ paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/file?_s=recovered' });
+  h.click('.retry-btn'); await h.idle();
+  assert.equal(h.currentStatus(), 'success');
+});
+
+test('批量失败重试每篇只刷新一次详情，沿用同一公开状态校验及下载流程', async () => {
+  const h = retryHarness(); await h.failFirst(); const parsed = [];
+  h.context.resolveProquestPaper = async p => {
+    parsed.push(p.id);
+    return { paper: { ...p, pdfReady: true, pdfFailed: false }, pdfUrl: `https://media.proquest.com/media/${p.id}?_s=fresh` };
+  };
+  await h.button('#btn-retry-failed'); await h.idle();
+  assert.deepEqual(parsed, [paper().id, 222]);
+  assert.equal(h.calls.filter(c => c.type === 'SAVE_DOWNLOAD').length, 2);
+  assert.equal(h.currentStatus(), 'success');
+});
+
+test('批量重试连续失败暂停后，继续下载仍能解析剩余公开论文', async () => {
+  const h = retryHarness(); await h.failFirst();
+  await h.context.mutatePapers('add', { items: [{ ...paper('333'), pdfFailed: true, pdfReady: false }] });
+  const parsed = [];
+  h.context.resolveProquestPaper = async p => { parsed.push(p.id); return h.missing(p); };
+  await h.button('#btn-retry-failed'); await h.idle();
+  assert.deepEqual(parsed, [paper().id, 222]);
+  assert.equal(h.el('#btn-resume').hidden, false);
+  h.context.resolveProquestPaper = async p => {
+    parsed.push(p.id);
+    return { paper: { ...p, pdfReady: true }, pdfUrl: 'https://media.proquest.com/media/file?_s=resume' };
+  };
+  await h.button('#btn-resume'); await h.idle();
+  assert.deepEqual(parsed, [paper().id, 222, 333]);
+  assert.equal(h.calls.filter(c => c.type === 'SAVE_DOWNLOAD').length, 1);
+});
 
 test('ProQuest 文档按稳定 ID 去重，不保存搜索会话路径、查询参数或片段', () => {
   const { context: { ProQuest: api } } = harness();
