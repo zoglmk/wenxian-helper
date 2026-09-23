@@ -706,7 +706,8 @@ async function downloadAsFile(filename, content, mimeType = "text/plain") {
   const blob = new Blob([content], { type: mimeType + ";charset=utf-8" });
   const url = URL.createObjectURL(blob);
   try {
-    await chrome.downloads.download({ url, filename, saveAs: true });
+    const result = await sendToBackground({ type: "SAVE_DOWNLOAD", url, filename, saveAs: true });
+    if (!result?.ok) throw new Error(result?.error || "导出下载未能启动");
   } finally {
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }

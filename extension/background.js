@@ -74,12 +74,26 @@ async function handleFetchPost({ url, body, referrer, headers }) {
   return { ok: res.ok, status: res.status, text: await res.text(), finalUrl: res.url };
 }
 
-async function handleSaveDownload({ url, filename, useFolder }) {
+async function handleSaveDownload({ url, filename, useFolder, saveAs = false }) {
   await folderReady;
   const folder = useFolder ? DownloadTracking.folderName(cachedDownloadFolder) : "";
   if (folder) filename = `${folder}/${filename}`;
-  const downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
-  return { ok: true, downloadId };
+  // Chrome 注册文件名监听后，API 的 filename 仍可能被服务器名称覆盖。
+  // 先登记，再用下载 ID 关联文件名事件；同 URL 的并发任务也不能串名。
+  let resolveId;
+  const task = { url, filename, ready: new Promise(resolve => { resolveId = resolve; }) };
+  apiDownloadTasks.add(task);
+  try {
+    const downloadId = await chrome.downloads.download({ url, filename, saveAs });
+    task.id = downloadId;
+    await chrome.storage.session.set({ [downloadNameKey(downloadId)]: filename });
+    resolveId(downloadId);
+    return { ok: true, downloadId };
+  } catch (err) {
+    resolveId(null);
+    apiDownloadTasks.delete(task);
+    throw err;
+  }
 }
 
 // 缓存文件夹设置
@@ -95,7 +109,39 @@ chrome.storage.onChanged.addListener((changes) => {
 
 // 标记限于一个原始 URL，失败、验证码和等待结束后主动清理；遗留标记 15 秒过期。
 const pendingDownloads = new Map();
+const apiDownloadTasks = new Set();
+const downloadNameKey = (id) => `cnkiDownloadName:${id}`;
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!["complete", "interrupted"].includes(delta.state?.current)) return;
+  chrome.storage.session.remove(downloadNameKey(delta.id)).catch(err => console.error("清理下载文件名失败:", err));
+  for (const task of apiDownloadTasks) {
+    task.ready.then(async id => {
+      if (id !== delta.id) return;
+      apiDownloadTasks.delete(task);
+      await chrome.storage.session.remove(downloadNameKey(id));
+    }).catch(err => console.error("清理下载文件名失败:", err));
+  }
+});
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  const ownTasks = item.byExtensionId === chrome.runtime.id
+    ? [...apiDownloadTasks].filter(task => task.url === item.url) : [];
+  if (item.byExtensionId === chrome.runtime.id) {
+    Promise.all(ownTasks.map(task => task.ready)).then(async ids => {
+      const task = ownTasks[ids.indexOf(item.id)];
+      const key = downloadNameKey(item.id);
+      // 请求较慢、后台休眠重启后，仍按 ID 恢复已登记的文件名。
+      const filename = task?.filename || (await chrome.storage.session.get(key))[key];
+      if (filename) {
+        apiDownloadTasks.delete(task);
+        await chrome.storage.session.remove(key);
+        suggest({ filename, conflictAction: "uniquify" });
+      } else suggest();
+    }).catch(err => {
+      console.error("读取下载文件名失败:", err);
+      suggest();
+    });
+    return true;
+  }
   for (const [token, task] of pendingDownloads) {
     if (task.expires <= Date.now()) { pendingDownloads.delete(token); continue; }
     if (!DownloadTracking.matches(item, task.url)) continue;

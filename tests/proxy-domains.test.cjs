@@ -253,7 +253,7 @@ test('后台只接受扩展自身设置页的域名变更，拒绝网页内容�
   const event = { addListener: () => {} };
   h.chrome.permissions.onRemoved = event;
   h.chrome.storage.onChanged = event;
-  h.chrome.downloads = { onDeterminingFilename: event };
+  h.chrome.downloads = { onDeterminingFilename: event, onChanged: event };
   h.chrome.sidePanel = { setPanelBehavior: async () => {} };
   h.chrome.runtime.id = 'test-extension';
   h.chrome.runtime.getURL = (url) => `chrome-extension://test-extension/${url}`;
