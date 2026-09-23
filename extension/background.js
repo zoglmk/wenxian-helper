@@ -1,4 +1,12 @@
 /* Service Worker - handles networking, downloads, and side panel setup */
+importScripts("proxy-domains.js");
+
+// 动态脚本跨重启保留；启动和外部撤销权限时核对注册状态。
+function syncProxyDomains() {
+  ProxyDomains.update("sync").catch((err) => console.error("代理域名同步失败:", err));
+}
+syncProxyDomains();
+chrome.permissions.onRemoved.addListener(syncProxyDomains);
 
 // Open side panel on extension icon click
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -75,6 +83,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "FETCH_POST") return await handleFetchPost(msg);
       if (msg.type === "SAVE_DOWNLOAD") return await handleSaveDownload(msg);
       if (msg.type === "MARK_DOWNLOAD") { pluginDownloadPending++; return { ok: true }; }
+      if (msg.type === "UPDATE_PROXY_DOMAIN") {
+        // 网站内容脚本无权修改域名设置。
+        if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("sidepanel/index.html")) {
+          throw new Error("请从文献助手设置中修改代理域名");
+        }
+        const domains = await ProxyDomains.update(msg.action, msg.domain);
+        return { ok: true, domains };
+      }
       return { ok: false, error: "unknown_type" };
     } catch (err) {
       return { ok: false, error: err?.message || "unknown_error" };

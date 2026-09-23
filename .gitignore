@@ -1,3 +1,5 @@
 *.zip
 .DS_Store
 发布文章*.md
+.playwright-cli/
+output/playwright/

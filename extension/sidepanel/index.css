@@ -209,6 +209,15 @@ body {
 .btn-ghost:hover { background: var(--c-surface); color: var(--c-text-2); }
 
 /* ── Folder Row ── */
+.proxy-settings { padding: 0 16px 10px; flex-shrink: 0; max-height: 240px; overflow-y: auto; }
+.proxy-settings summary { color: var(--c-text-2); cursor: pointer; font-size: 12px; }
+.proxy-tip { color: var(--c-text-2); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.proxy-input-row { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.proxy-input-row input { min-width: 0; }
+.proxy-domain-list { list-style: none; margin-top: 6px; }
+.proxy-domain-list li { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.proxy-domain-list span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
+
 .folder-row {
   display: flex;
   align-items: center;

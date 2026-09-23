@@ -239,8 +239,10 @@
   // Detect if this is a CNKI page (direct or via WebVPN)
   function isCnkiPage() {
     return location.hostname.includes("cnki") ||
-      getTitleLinks().length > 0 ||
-      !!document.querySelector(".result-table-list, #gridTable, #CataLogContent");
+      !!document.querySelector(".result-table-list, #gridTable, #CataLogContent, .J_list.list") ||
+      // 自定义域名可覆盖图书馆门户；普通页面的 .fz14 字号样式不是知网证据。
+      Array.from(getTitleLinks()).some((link) => /\/kcms\d?\/|[?&](filename|dbcode)=/i.test(link.href)) ||
+      (!!document.querySelector(".wx-tit h1") && !!document.querySelector(".operate-btn, #pdfDown, #cajDown"));
   }
 
   function activate() {
@@ -270,7 +272,10 @@
   // ── Message Handlers ──
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "PING") {
-      sendResponse({ ok: true });
+      const isCnki = isCnkiPage();
+      // 代理页可能在首次检查结束后才加载知网内容，手动操作时再次激活。
+      if (isCnki) activate();
+      sendResponse({ ok: true, isCnki });
       return;
     }
     if (msg.type === "ADD_ALL_PAGE") {

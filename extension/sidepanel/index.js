@@ -31,8 +31,8 @@ async function sendToBackground(msg) {
   return chrome.runtime.sendMessage(msg);
 }
 
-async function ensureContentScript() {
-  const tab = await getActiveTab();
+async function ensureContentScript(tab = null) {
+  tab = tab || await getActiveTab();
   if (!tab?.id) return false;
   try {
     await chrome.tabs.sendMessage(tab.id, { type: "PING" });
@@ -42,6 +42,66 @@ async function ensureContentScript() {
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/main.js"] });
       return true;
     } catch { return false; }
+  }
+}
+
+// ── Custom Library / Proxy Domains ──
+async function renderProxyDomains() {
+  const list = $("#proxy-domain-list");
+  const domains = await ProxyDomains.list();
+  list.replaceChildren();
+  for (const domain of domains) {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = domain;
+    const remove = document.createElement("button");
+    remove.className = "btn btn-ghost btn-sm";
+    remove.textContent = "移除";
+    remove.setAttribute("aria-label", `移除 ${domain}`);
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        const result = await sendToBackground({ type: "UPDATE_PROXY_DOMAIN", action: "remove", domain });
+        if (!result?.ok) throw new Error(result?.error || "移除失败");
+        await renderProxyDomains();
+        $("#proxy-status").textContent = "已移除域名及访问权限，已打开的页面刷新后生效";
+      } catch (err) {
+        $("#proxy-status").textContent = `移除失败：${err.message}`;
+      } finally {
+        remove.disabled = false;
+      }
+    });
+    item.append(label, remove);
+    list.appendChild(item);
+  }
+}
+
+async function addProxyDomain() {
+  const status = $("#proxy-status");
+  const button = $("#btn-add-proxy");
+  button.disabled = true;
+  try {
+    const domain = ProxyDomains.normalize($("#input-proxy-domain").value);
+    // 必须直接在点击回调中申请权限，不能先等待网络或 storage 操作。
+    const granted = await chrome.permissions.request({ origins: [ProxyDomains.pattern(domain)] });
+    if (!granted) {
+      status.textContent = "未获得授权，域名未添加；已有下载功能不受影响";
+      return;
+    }
+    const result = await sendToBackground({ type: "UPDATE_PROXY_DOMAIN", action: "add", domain });
+    if (!result?.ok) throw new Error(result?.error || "保存失败");
+    $("#input-proxy-domain").value = "";
+    await renderProxyDomains();
+    status.textContent = "已添加。请在该域名下的知网搜索结果页点击「添加本页」";
+    const tab = await getActiveTab();
+    if (tab?.url && ProxyDomains.matchesHost(new URL(tab.url).hostname, domain)) {
+      const ready = await ensureContentScript(tab);
+      if (!ready) status.textContent = "域名已保存，请刷新知网页面后点击「添加本页」";
+    }
+  } catch (err) {
+    status.textContent = `设置失败：${err.message}`;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -373,15 +433,43 @@ const STYLE_TO_DISPLAY_MODE = { gb7714: "GBTREFER", apa: "APA", mla: "MLA" };
 // CNKI's export endpoints reject requests whose Origin is the chrome-extension://
 // scheme. Run fetch from a CNKI page tab (MAIN world) so Origin is kns.cnki.net.
 function isCnkiLikeUrl(url = "") {
-  return /cnki\.net/i.test(url) || /edu\.cn/i.test(url);
+  try {
+    const { protocol, hostname } = new URL(url);
+    return /^https?:$/.test(protocol) && /(^|\.)(cnki\.net|edu\.cn)$/i.test(hostname);
+  } catch {
+    return false;
+  }
 }
 
 async function getCnkiTab() {
   const active = await getActiveTab();
   if (active?.id && isCnkiLikeUrl(active.url)) return active;
+  // 公共图书馆代理未必使用 cnki.net / edu.cn。只检查当前页，使用用户
+  // 点击扩展图标时授予的 activeTab 权限，不扩大永久网站访问权限。
+  if (active?.id && await ensureContentScript(active)) {
+    try {
+      const status = await chrome.tabs.sendMessage(active.id, { type: "PING" });
+      if (status?.isCnki) return active;
+    } catch {
+      // 标签页已跳转或关闭时，继续查找原有的知网 / 学校代理标签页。
+    }
+  }
   // 当前激活页不是知网/WebVPN，搜索所有已打开的相关标签页
   const tabs = await chrome.tabs.query({});
-  return tabs.find((t) => t.id && isCnkiLikeUrl(t.url)) || null;
+  const existing = tabs.find((t) => t.id && isCnkiLikeUrl(t.url));
+  if (existing) return existing;
+  const domains = await ProxyDomains.list();
+  for (const tab of tabs) {
+    if (!tab.id || !tab.url) continue;
+    if (!domains.some((domain) => ProxyDomains.matchesHost(new URL(tab.url).hostname, domain))) continue;
+    try {
+      const status = await chrome.tabs.sendMessage(tab.id, { type: "PING" });
+      if (status?.isCnki) return tab;
+    } catch {
+      // 该代理页尚未加载或已失去权限，继续查找可用页面。
+    }
+  }
+  return null;
 }
 
 async function postViaCnkiPage(url, body) {
@@ -797,7 +885,7 @@ async function downloadPaper(id) {
 
   try {
     // Trigger iframe in a CNKI/WebVPN tab so cookies and Referer are correct.
-    // Falls back to any open tab matching cnki.net, libvpn, or webvpn domains.
+    // Also recognizes the active library proxy page by its CNKI content.
     const tab = await getCnkiTab();
     if (!tab?.id) throw new Error("请打开知网页面后再下载");
 
@@ -1632,6 +1720,7 @@ function switchTab(feature) {
 }
 
 function bindEvents() {
+  $("#btn-add-proxy").addEventListener("click", addProxyDomain);
   // Download folder
   $("#input-folder").addEventListener("input", async (e) => {
     settings.downloadFolder = e.target.value.trim();
@@ -1668,7 +1757,7 @@ function bindEvents() {
   // Add all papers from current page
   $("#btn-add-page").addEventListener("click", async () => {
     const ok = await ensureContentScript();
-    if (!ok) { $("#footer-status").textContent = "请在知网页面使用"; return; }
+    if (!ok) { $("#footer-status").textContent = "请先进入知网搜索结果页，点击浏览器工具栏的文献助手图标后重试"; return; }
     try {
       const result = await sendToContent({ type: "ADD_ALL_PAGE", useWebVPN: settings.useWebVPN });
       if (!result?.ok) {
@@ -1808,6 +1897,9 @@ function bindEvents() {
 
   // Real-time storage sync (papers added from content script)
   chrome.storage.onChanged.addListener((changes) => {
+    if (changes[ProxyDomains.storageKey]) {
+      renderProxyDomains().catch((err) => { $("#proxy-status").textContent = `读取域名失败：${err.message}`; });
+    }
     if (!changes.cnkiPapers) return;
     papers = changes.cnkiPapers.newValue || [];
     renderList();
@@ -1827,8 +1919,8 @@ function setupTipQrFallback() {
 }
 
 // ── Update Notes ──
-const CURRENT_VERSION = "1.2.2";
-const UPDATE_NOTE = 'v1.2.2 更新：修复 DOI 导入因权限缺失导致全部失败的问题';
+const CURRENT_VERSION = "1.2.3";
+const UPDATE_NOTE = 'v1.2.3 更新：支持自行添加图书馆 / 代理域名，修复非教育网代理页识别问题';
 
 async function checkUpdate() {
   const data = await chrome.storage.local.get(["lastSeenVersion"]);
@@ -1853,6 +1945,9 @@ async function init() {
   setupTipQrFallback();
   renderList();
   checkUpdate();
+  renderProxyDomains().catch((err) => { $("#proxy-status").textContent = `读取域名失败：${err.message}`; });
+  // 工具栏点击授予 activeTab 后，为未自动匹配的图书馆代理页加载按钮。
+  await ensureContentScript();
   if (papers.length > 0) {
     setTimeout(() => { restoreChecks(); updateFooter(); if (settings.fetchLevels) loadAllLevels(); }, 50);
   }
